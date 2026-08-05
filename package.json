@@ -1,0 +1,48 @@
+{
+  "name": "superslate",
+  "version": "0.3.0",
+  "description": "Create a production-oriented SaaS application from superslate.",
+  "keywords": [
+    "bun",
+    "postgres",
+    "react",
+    "saas",
+    "starter"
+  ],
+  "homepage": "https://superslate.dev",
+  "bugs": {
+    "url": "https://github.com/superslate-dev/superslate-cli/issues"
+  },
+  "license": "MIT",
+  "author": "supercollective <npm@supercollective.studio> (https://superslate.dev)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/superslate-dev/superslate-cli.git"
+  },
+  "bin": {
+    "superslate": "dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "LICENSE",
+    "README.md"
+  ],
+  "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun build src/cli.ts --target=node --outfile=dist/cli.js && node -e \"const f='dist/cli.js',fs=require('fs');fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace(/^#!.*\\n/, '#!/usr/bin/env node\\n'));fs.chmodSync(f,0o755)\"",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "devDependencies": {
+    "@clack/prompts": "^1.7.0",
+    "@types/bun": "^1.3.14",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,70 @@
+name: Publish CLI
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    name: Publish superslate CLI to npm
+    if: github.repository == 'superslate-dev/superslate-cli'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout exact release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - name: Setup Node for npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+
+      - name: Require an npm CLI with trusted-publishing support
+        run: npm install -g npm@latest
+
+      - name: Install build dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Require the package version to match the release tag
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version package.json)"
+          tag="${GITHUB_REF_NAME}"
+          if [[ "v$version" != "$tag" ]]; then
+            echo "package.json version $version does not match tag $tag" >&2
+            exit 1
+          fi
+
+      - name: Skip already-published versions
+        id: guard
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version package.json)"
+          if npm view "superslate@$version" version >/dev/null 2>&1; then
+            echo "superslate@$version is already on npm; skipping publish."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish via trusted publishing with provenance
+        if: steps.guard.outputs.skip != 'true'
+        run: npm publish
+
+      - name: Verify the published attestation
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          version="$(jq -r .version package.json)"
+          curl -sfL "https://registry.npmjs.org/-/npm/v1/attestations/superslate@$version" >/dev/null
