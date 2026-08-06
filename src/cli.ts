@@ -13,6 +13,7 @@ import {
   normalizeSourceVersion,
   readLicenseKeyFromEnvironment,
   validateLicenseKey,
+  type DownloadProgress,
 } from './delivery.js'
 import {agentSetupUsage, runAgentSetup} from './agent-setup.js'
 import {runDeploymentConfigure} from './deployment-cli.js'
@@ -403,13 +404,6 @@ async function installDependencies(target: string): Promise<void> {
   }
 }
 
-async function runCapturedCommand(command: string[], target: string): Promise<void> {
-  const {stdout, stderr, exitCode} = await runCaptured(command, {cwd: target})
-  if (exitCode !== 0) {
-    throw new Error(`${command.join(' ')} failed.${commandFailureOutput(stdout, stderr)}`)
-  }
-}
-
 export async function occupiedDevelopmentPorts(): Promise<number[]> {
   const results = await Promise.all(
     [5173, 8000].map(async port => ({port, available: await isPortAvailable(port)})),
@@ -418,17 +412,75 @@ export async function occupiedDevelopmentPorts(): Promise<number[]> {
 }
 
 async function startDevelopment(target: string): Promise<void> {
-  await runStep('Starting local Postgres', 'Local Postgres is ready', () =>
-    runCapturedCommand(['docker', 'compose', 'up', '-d', '--wait', 'postgres'], target),
-  )
   prompts.log.info('Web  http://localhost:5173\nAPI  http://localhost:8000')
   prompts.outro(
     'Development servers are starting. Ctrl+C stops app servers; Postgres stays running.',
   )
 
-  const exitCode = await runInherited(['vp', 'run', '-r', '--parallel', 'dev'], {cwd: target})
+  const exitCode = await runInherited(['pnpm', 'run', 'dev'], {cwd: target})
   if (exitCode !== 0 && exitCode !== 130) {
     throw new Error(`Development servers exited with code ${exitCode}.`)
+  }
+}
+
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB']
+const BYTE_SCALE = 1024
+const PROGRESS_MAX = 100
+const PROGRESS_BAR_WIDTH = 40
+const PROGRESS_MIN_INTERVAL_MS = 80
+const PROGRESS_MIN_DELTA = 0.5
+
+export function formatBytes(bytes: number): string {
+  let value = bytes
+  let unit = 0
+  while (value >= BYTE_SCALE && unit < BYTE_UNITS.length - 1) {
+    value /= BYTE_SCALE
+    unit += 1
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${BYTE_UNITS[unit]}`
+}
+
+function supportsAnimation(): boolean {
+  return prompts.isTTY(process.stdout) && !prompts.isCI()
+}
+
+interface ScaffoldReporter {
+  handle: prompts.SpinnerResult
+  onDownloadProgress?: DownloadProgress
+}
+
+function createScaffoldReporter(pending: string, expectsDownload: boolean): ScaffoldReporter {
+  if (!expectsDownload || !supportsAnimation()) return {handle: prompts.spinner()}
+
+  const bar = prompts.progress({
+    style: 'heavy',
+    size: PROGRESS_BAR_WIDTH,
+    max: PROGRESS_MAX,
+  })
+  let shown = 0
+  let emittedAt = 0
+  return {
+    handle: bar,
+    onDownloadProgress: (received, total) => {
+      const percent = total ? Math.min(PROGRESS_MAX, (received / total) * PROGRESS_MAX) : shown
+      const finished = total !== undefined && received >= total
+      const now = performance.now()
+      if (
+        !finished &&
+        now - emittedAt < PROGRESS_MIN_INTERVAL_MS &&
+        percent - shown < PROGRESS_MIN_DELTA
+      ) {
+        return
+      }
+      emittedAt = now
+      const label = finished
+        ? pending
+        : total === undefined
+          ? `Downloading source  ${formatBytes(received)}`
+          : `Downloading source  ${formatBytes(received)} / ${formatBytes(total)}`
+      bar.advance(percent - shown, label)
+      shown = percent
+    },
   }
 }
 
@@ -436,16 +488,15 @@ async function runStep<T>(
   pending: string,
   complete: string,
   action: () => Promise<T>,
-  indicator: 'dots' | 'timer' = 'dots',
+  handle: prompts.SpinnerResult,
 ): Promise<T> {
-  const progress = prompts.spinner({indicator})
-  progress.start(pending)
+  handle.start(pending)
   try {
     const result = await action()
-    progress.stop(complete)
+    handle.stop(complete)
     return result
   } catch (error) {
-    progress.error(`${pending} failed`)
+    handle.error(`${pending} failed`)
     throw error
   }
 }
@@ -460,23 +511,34 @@ async function createApplication(
   await mkdir(dirname(target), {recursive: true})
   const staging = await mkdtemp(join(dirname(target), `.${options.appName}-${CLI_NAME}-`))
 
+  const preparing = 'Preparing your application'
+  const reporter = createScaffoldReporter(preparing, Boolean(options.licenseKey))
+
   try {
-    await runStep('Preparing your application', 'Application source prepared', () =>
-      scaffold({
-        appName: options.appName,
-        scope: options.scope,
-        brandName: options.brandName,
-        targetDirectory: staging,
-        from: options.from,
-        licenseKey: options.licenseKey,
-        sourceVersion: options.sourceVersion,
-        initializeGit: options.initializeGit,
-        databasePort,
-      }),
+    await runStep(
+      preparing,
+      'Application source prepared',
+      () =>
+        scaffold({
+          appName: options.appName,
+          scope: options.scope,
+          brandName: options.brandName,
+          targetDirectory: staging,
+          from: options.from,
+          licenseKey: options.licenseKey,
+          sourceVersion: options.sourceVersion,
+          initializeGit: options.initializeGit,
+          databasePort,
+          onDownloadProgress: reporter.onDownloadProgress,
+        }),
+      reporter.handle,
     )
     if (options.deployment) {
-      await runStep('Configuring deployment', 'Deployment target locked', () =>
-        applyDeploymentSelection(staging, options.appName, options.deployment!),
+      await runStep(
+        'Configuring deployment',
+        'Deployment target locked',
+        () => applyDeploymentSelection(staging, options.appName, options.deployment!),
+        prompts.spinner(),
       )
     }
     if (options.installDependencies) {
@@ -484,7 +546,7 @@ async function createApplication(
         'Installing dependencies with pnpm',
         'Dependencies installed with pnpm',
         () => installDependencies(staging),
-        'timer',
+        prompts.spinner({indicator: 'timer'}),
       )
     }
 
@@ -510,12 +572,7 @@ function completionDetails(
   const install = options.installDependencies ? [] : ['vp install --frozen-lockfile']
   return {
     directory: `./${targetName}`,
-    commands: [
-      `cd ${targetName}`,
-      ...install,
-      'docker compose up -d postgres',
-      'vp run -r --parallel dev',
-    ].join('\n'),
+    commands: [`cd ${targetName}`, ...install, 'pnpm dev'].join('\n'),
     database: `Postgres  localhost:${databasePort}`,
   }
 }

@@ -1,7 +1,7 @@
 import {createWriteStream} from 'node:fs'
 import {rm} from 'node:fs/promises'
 import {join} from 'node:path'
-import {Readable} from 'node:stream'
+import {Readable, Transform} from 'node:stream'
 import {pipeline} from 'node:stream/promises'
 
 import {
@@ -22,6 +22,8 @@ export interface ReleaseAssetNames {
   checksum: string
   manifest: string
 }
+
+export type DownloadProgress = (received: number, total?: number) => void
 
 const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+(?:-rc\.\d+)?$/
 const INDEX_TIMEOUT_MS = 15_000
@@ -120,12 +122,31 @@ export async function resolveRelease(
   return index
 }
 
+function readContentLength(response: Response): number | undefined {
+  const header = response.headers.get('content-length')
+  if (!header) return undefined
+  const total = Number(header)
+  return Number.isSafeInteger(total) && total > 0 ? total : undefined
+}
+
+function countBytes(total: number | undefined, onBytes: DownloadProgress): Transform {
+  let received = 0
+  return new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      received += chunk.length
+      onBytes(received, total)
+      done(null, chunk)
+    },
+  })
+}
+
 export async function downloadAsset(
   licenseKey: string,
   releaseTag: string,
   assetName: string,
   directory: string,
   baseUrl = deliveryBaseUrl(),
+  onBytes?: DownloadProgress,
 ): Promise<string> {
   const response = await requestDelivery(
     `${baseUrl}/v1/source/${encodeURIComponent(releaseTag)}/${encodeURIComponent(assetName)}`,
@@ -138,11 +159,17 @@ export async function downloadAsset(
   if (!response.body) throw new Error(`Source delivery returned an empty ${assetName}.`)
 
   const path = join(directory, assetName)
+  const source = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0])
   try {
-    await pipeline(
-      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-      createWriteStream(path),
-    )
+    if (onBytes) {
+      await pipeline(
+        source,
+        countBytes(readContentLength(response), onBytes),
+        createWriteStream(path),
+      )
+    } else {
+      await pipeline(source, createWriteStream(path))
+    }
   } catch {
     await rm(path, {force: true})
     throw new Error(`Downloading ${assetName} was interrupted. Try again in a few minutes.`)

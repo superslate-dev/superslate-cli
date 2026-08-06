@@ -450,6 +450,7 @@ export function isTemplatePathExcluded(relativePath: string): boolean {
   if (normalized === '.github/workflows/internal-commercial.yml') return true
   if (normalized === 'apps/worker' || normalized.startsWith('apps/worker/')) return true
   if (parts.includes('dist') || parts.includes('out')) return true
+  if (parts.includes('.next') || parts.includes('.source') || parts.includes('.turbo')) return true
   if (normalized === 'bun.lock') return true
   if (normalized === '.vercelignore') return true
   if (basename.endsWith('.tfvars') || basename === 'backend.hcl') return true

@@ -67,4 +67,14 @@ jobs:
         run: |
           set -euo pipefail
           version="$(jq -r .version package.json)"
-          curl -sfL "https://registry.npmjs.org/-/npm/v1/attestations/superslate@$version" >/dev/null
+          url="https://registry.npmjs.org/-/npm/v1/attestations/superslate@$version"
+          for attempt in $(seq 1 10); do
+            if curl -sfL "$url" >/dev/null; then
+              echo "Attestation published for superslate@$version."
+              exit 0
+            fi
+            echo "Attestation not visible yet (attempt $attempt); retrying."
+            sleep 15
+          done
+          echo "No provenance attestation for superslate@$version after 10 attempts." >&2
+          exit 1

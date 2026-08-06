@@ -6,7 +6,13 @@ import {basename, join, relative, resolve} from 'node:path'
 import {promisify} from 'node:util'
 
 import {BUYER_CLI_NAME, BUYER_CLI_PACKAGE_NAME, CLI_NAME, CLI_PACKAGE_NAME} from './constants.js'
-import {deliveryBaseUrl, downloadAsset, releaseAssetNames, resolveRelease} from './delivery.js'
+import {
+  deliveryBaseUrl,
+  downloadAsset,
+  releaseAssetNames,
+  resolveRelease,
+  type DownloadProgress,
+} from './delivery.js'
 import {
   BRAND_MANIFEST,
   formatRewrittenPackageJson,
@@ -39,6 +45,7 @@ export interface ScaffoldOptions {
   sourceVersion?: string
   initializeGit: boolean
   databasePort?: number
+  onDownloadProgress?: DownloadProgress
 }
 
 export interface ScaffoldReport {
@@ -130,6 +137,7 @@ async function downloadLicensedTemplate(
   target: string,
   licenseKey: string,
   sourceVersion?: string,
+  onDownloadProgress?: DownloadProgress,
 ): Promise<void> {
   const baseUrl = deliveryBaseUrl()
   const releaseTag = sourceVersion ?? (await resolveRelease(licenseKey, baseUrl)).latest
@@ -144,6 +152,7 @@ async function downloadLicensedTemplate(
       artifact,
       temporaryDirectory,
       baseUrl,
+      onDownloadProgress,
     )
     await downloadAsset(licenseKey, releaseTag, checksumName, temporaryDirectory, baseUrl)
     await downloadAsset(licenseKey, releaseTag, manifestName, temporaryDirectory, baseUrl)
@@ -350,7 +359,12 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldReport
   try {
     if (options.from) await copyLocalTemplate(options.from, target)
     else if (options.licenseKey) {
-      await downloadLicensedTemplate(target, options.licenseKey, options.sourceVersion)
+      await downloadLicensedTemplate(
+        target,
+        options.licenseKey,
+        options.sourceVersion,
+        options.onDownloadProgress,
+      )
     } else {
       throw new Error(`A local source path or a ${CLI_NAME} licence key is required.`)
     }

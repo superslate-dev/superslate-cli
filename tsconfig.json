@@ -18,7 +18,7 @@
     "moduleResolution": "bundler",
     "noEmit": true,
     "types": [
-      "bun"
+      "node"
     ]
   },
   "include": [
