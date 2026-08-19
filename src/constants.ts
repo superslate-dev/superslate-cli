@@ -7,6 +7,7 @@ export const DEFAULT_SCOPE = '@app'
 export const DEFAULT_BRAND_NAME = 'App'
 export const SOURCE_BRAND_NAME = 'superslate'
 
+export const DOCS_BASE_URL = 'https://docs.superslate.dev'
 export const DELIVERY_BASE_URL = 'https://dl.superslate.dev'
 export const DELIVERY_URL_VARIABLE = 'SUPERSLATE_DELIVERY_URL'
 export const LICENSE_KEY_VARIABLE = 'SUPERSLATE_LICENSE_KEY'

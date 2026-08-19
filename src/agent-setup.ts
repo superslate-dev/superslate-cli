@@ -13,9 +13,17 @@ export interface AgentSetupArguments {
 }
 
 const CLIENTS: AgentClient[] = ['codex', 'claude', 'cursor']
-const SERVER_NAME = 'superslate-docs'
-const CODEX_START = '# superslate-agent-context:start'
-const CODEX_END = '# superslate-agent-context:end'
+const SERVER_NAME = 'agent-docs'
+const CODEX_START = '# agent-context:start'
+const CODEX_END = '# agent-context:end'
+const AGENT_CONTEXT_TOOLS = [
+  'search_docs',
+  'search_implementation',
+  'get_repository_map',
+  'plan_change',
+  'get_invariants',
+  'get_verification',
+] as const
 
 function takeValue(args: string[], index: number, flag: string): string {
   const value = args[index + 1]
@@ -46,7 +54,7 @@ export function parseAgentSetupArguments(argv: string[]): AgentSetupArguments {
 export function agentSetupUsage(cliName: string): string {
   return `Usage: ${cliName} agent setup [options]
 
-Connect local coding clients to this checkout's read-only superslate documentation server.
+Connect local coding clients to this checkout's read-only project context server.
 
 Options:
   --clients <list>  Comma-separated clients: codex,claude,cursor
@@ -70,13 +78,13 @@ export async function findAgentRepositoryRoot(start = process.cwd()): Promise<st
       return current
     }
     const parent = dirname(current)
-    if (parent === current) throw new Error('Run agent setup inside a superslate repository.')
+    if (parent === current) throw new Error('Run agent setup inside a project repository.')
     current = parent
   }
 }
 
 export function serverCommand(root: string): {command: string; args: string[]} {
-  return {command: 'pnpm', args: ['--dir', resolve(root), 'superslate:mcp']}
+  return {command: 'pnpm', args: ['--dir', resolve(root), 'agent:mcp']}
 }
 
 function codexManagedBlock(root: string): string {
@@ -87,7 +95,7 @@ function codexManagedBlock(root: string): string {
 command = ${JSON.stringify(server.command)}
 args = [${args}]
 required = false
-enabled_tools = ["search_docs", "get_repository_map", "plan_change", "get_invariants", "get_verification"]
+enabled_tools = ${JSON.stringify(AGENT_CONTEXT_TOOLS)}
 ${CODEX_END}`
 }
 
@@ -97,14 +105,12 @@ export function mergeCodexConfig(existing: string, root: string): string {
   const end = existing.indexOf(CODEX_END)
   if (start >= 0 || end >= 0) {
     if (start < 0 || end < start)
-      throw new Error('Codex config has an incomplete superslate block.')
+      throw new Error('Codex config has an incomplete agent-context block.')
     const after = end + CODEX_END.length
     return `${existing.slice(0, start).trimEnd()}\n\n${managed}${existing.slice(after)}`.trimStart()
   }
-  if (/^\[mcp_servers\.(?:superslate-docs|superslate_docs|"superslate-docs")\]$/m.test(existing)) {
-    throw new Error(
-      'Codex already has an unmanaged superslate-docs server; remove or rename it first.',
-    )
+  if (/^\[mcp_servers\.(?:agent-docs|agent_docs|"agent-docs")\]$/m.test(existing)) {
+    throw new Error('Codex already has an unmanaged agent-docs server; remove or rename it first.')
   }
   return `${existing.trimEnd()}${existing.trim() ? '\n\n' : ''}${managed}\n`
 }
@@ -133,9 +139,7 @@ export function mergeCursorConfig(existing: string | undefined, root: string): s
   const current = servers[SERVER_NAME]
   const desired = serverCommand(root)
   if (current !== undefined && JSON.stringify(current) !== JSON.stringify(desired)) {
-    throw new Error(
-      'Cursor already has a different superslate-docs server; remove or rename it first.',
-    )
+    throw new Error('Cursor already has a different agent-docs server; remove or rename it first.')
   }
   config.mcpServers = {...servers, [SERVER_NAME]: desired}
   return `${JSON.stringify(config, null, 2)}\n`
@@ -169,7 +173,7 @@ async function addGitInfoExcludes(root: string, paths: string[]): Promise<boolea
   const missing = paths.filter(path => !existing.split(/\r?\n/).includes(path))
   if (missing.length === 0) return true
   const prefix = existing && !existing.endsWith('\n') ? '\n' : ''
-  const marker = '# superslate local agent configuration'
+  const marker = '# Local agent configuration'
   const heading = existing.split(/\r?\n/).includes(marker) ? '' : `${marker}\n`
   await atomicWrite(excludePath, `${existing}${prefix}${heading}${missing.join('\n')}\n`)
   return true
@@ -200,10 +204,10 @@ async function configureClaude(root: string): Promise<string> {
   const existing = await capture(['claude', 'mcp', 'get', SERVER_NAME], root)
   if (existing.exitCode === 0) {
     const combined = `${existing.stdout}\n${existing.stderr}`
-    if (combined.includes('superslate:mcp') && combined.includes(root)) {
+    if (combined.includes('agent:mcp') && combined.includes(root)) {
       return 'Claude Code already has the matching local server.'
     }
-    throw new Error('Claude Code already has a different superslate-docs server; remove it first.')
+    throw new Error('Claude Code already has a different agent-docs server; remove it first.')
   }
 
   const server = serverCommand(root)
@@ -220,15 +224,17 @@ async function configureClaude(root: string): Promise<string> {
 
 async function smokeServer(root: string): Promise<void> {
   const result = await capture(
-    ['pnpm', '--dir', root, 'superslate:mcp', '--check', '--root', root],
+    ['pnpm', '--dir', root, 'agent:mcp', '--check', '--root', root],
     root,
   )
   if (result.exitCode !== 0) {
     const output = result.stderr.trim() || result.stdout.trim()
-    throw new Error(`superslate MCP self-check failed${output ? `: ${output}` : '.'}`)
+    throw new Error(`Agent context MCP self-check failed${output ? `: ${output}` : '.'}`)
   }
   const report = JSON.parse(result.stdout) as {ok?: boolean; tools?: number}
-  if (!report.ok || report.tools !== 5) throw new Error('superslate MCP self-check was incomplete.')
+  if (!report.ok || report.tools !== AGENT_CONTEXT_TOOLS.length) {
+    throw new Error('Agent context MCP self-check was incomplete.')
+  }
 }
 
 function detectedClients(): AgentClient[] {
@@ -300,7 +306,7 @@ export async function runAgentSetup(argv: string[], cliName: string): Promise<vo
   const clients = await chooseClients(parsed)
   if (!clients) return
 
-  prompts.intro('superslate local agent context')
+  prompts.intro('Local agent context')
   if (parsed.dryRun) {
     for (const client of clients) {
       prompts.log.info(`${client}\n${dryRunDescription(client, root)}`)
@@ -324,5 +330,5 @@ export async function runAgentSetup(argv: string[], cliName: string): Promise<vo
     prompts.log.success(`${client}: ${result}`)
   }
   prompts.log.info('Restart configured clients, then ask: “Use plan_change for my next feature.”')
-  prompts.outro('superslate agent context is ready.')
+  prompts.outro('Agent context is ready.')
 }

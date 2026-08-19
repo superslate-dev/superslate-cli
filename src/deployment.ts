@@ -187,7 +187,8 @@ Create a GitHub environment named \`${config.environment}\` and configure:
 - a \`BACKEND_HCL\` secret containing the selected remote-state backend configuration;
 - a \`TFVARS_JSON\` secret containing only:
   - ${providerInputs};
-- \`VITE_TERMS_URL\` and \`VITE_PRIVACY_URL\`.
+- \`VITE_TERMS_URL\` and \`VITE_PRIVACY_URL\`, plus \`VITE_MARKETING_URL\` when the product has a
+  public marketing site.
 
 ## Cloud preparation
 

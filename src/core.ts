@@ -9,6 +9,7 @@ import {
   DEFAULT_SCOPE,
   DELIVERY_BASE_URL,
   DELIVERY_URL_VARIABLE,
+  DOCS_BASE_URL,
   LICENSE_KEY_PREFIX,
   LICENSE_KEY_VARIABLE,
   SOURCE_BRAND_NAME,
@@ -25,6 +26,9 @@ export const BRAND_MANIFEST: readonly BrandManifestEntry[] = [
   {path: 'apps/web/public/favicon/site.webmanifest', occurrences: 2},
   {path: 'apps/web/public/offline.html', occurrences: 6},
   {path: 'apps/docs/lib/shared.ts', occurrences: 1},
+  {path: 'apps/docs/README.md', occurrences: 1},
+  {path: 'README.md', occurrences: 1},
+  {path: 'docs/meta.json', occurrences: 1},
   {path: 'apps/server/.env.example', occurrences: 1},
   {path: 'apps/server/src/config/env.ts', occurrences: 2},
   {path: 'apps/server/src/config/env.test.ts', occurrences: 1},
@@ -48,6 +52,7 @@ export const BRAND_MANIFEST: readonly BrandManifestEntry[] = [
   {path: 'apps/server/email-templates/security-alert.html', occurrences: 4},
   {path: 'apps/server/email-templates/verify-email.html', occurrences: 5},
   {path: 'apps/server/email-templates/reset-password.html', occurrences: 5},
+  {path: 'apps/server/email-templates/organization-invitation.html', occurrences: 3},
   {path: 'apps/server/email-templates/welcome-email.html', occurrences: 8},
 ] as const
 
@@ -115,7 +120,7 @@ export function rewriteBrandContent(content: string, brandName: string): Rewrite
   const error = validateBrandName(brandName)
   if (error) throw new Error(error)
   const escapedSourceBrand = SOURCE_BRAND_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const sourceBrandPattern = new RegExp(`\\b${escapedSourceBrand}\\b`, 'g')
+  const sourceBrandPattern = new RegExp(`\\b${escapedSourceBrand}\\b`, 'gi')
   const matches = content.match(sourceBrandPattern)
   if (brandName === SOURCE_BRAND_NAME || !matches) return {content, replacements: 0}
   return {
@@ -218,6 +223,20 @@ export function rewriteRootPackageName(content: string, appName: string): Rewrit
   return {content: `${JSON.stringify(parsed, null, 2)}\n`, replacements: 1}
 }
 
+const WORKER_NAME_DECLARATION = /^name = "[^"]*"$/m
+
+export function rewriteWorkerName(content: string, appName: string): RewriteResult {
+  const error = validateAppName(appName)
+  if (error) throw new Error(error)
+  const declaration = content.match(WORKER_NAME_DECLARATION)?.[0]
+  if (!declaration) {
+    throw new Error('Cloudflare Worker configuration is missing a name declaration.')
+  }
+  const replacement = `name = "${appName}"`
+  if (declaration === replacement) return {content, replacements: 0}
+  return {content: content.replace(WORKER_NAME_DECLARATION, replacement), replacements: 1}
+}
+
 function replaceMarkdownSection(content: string, heading: string, replacement: string): string {
   const marker = `## ${heading}\n`
   const start = content.indexOf(marker)
@@ -295,17 +314,22 @@ pnpm dlx ${CLI_NAME}@latest your-app
 cd your-app
 \`\`\`
 
-\`bunx ${CLI_NAME}@latest your-app\` is equivalent. Your licence key is on your purchase receipt
-and in the customer portal; pass it with \`--license-key\` or set \`${LICENSE_KEY_VARIABLE}\` to skip
-the prompt. The full walkthrough, including pinned tool versions, is in the
-[setup guide](https://docs.superslate.dev/docs/setup).
+\`bunx ${CLI_NAME}@latest your-app\` is equivalent. Your licence key is on your purchase receipt and in
+the customer portal; pass it with \`--license-key\` or set \`${LICENSE_KEY_VARIABLE}\` to skip the
+prompt. The full walkthrough, including pinned tool versions, is in the
+[setup guide](${DOCS_BASE_URL}/docs/setup).
 
-The commands below run this foundation in place. Use them to read, diff, or verify the source —
-not to build your product.
+The commands below run this foundation in place. Use them to read, diff, or verify the source — not
+to build your product.
 
 `
 
   return `${content.slice(0, index)}${bootstrap}${content.slice(index)}`
+}
+
+export function stripDistributionReadmeBootstrap(content: string): string {
+  if (!content.includes(BUYER_README_HEADING)) return content
+  return replaceMarkdownSection(content, 'Create your product', '')
 }
 
 const REQUIRED_BUYER_CLI_CONSTANTS = ['CLI_NAME', 'CLI_PACKAGE_NAME', 'DEFAULT_SCOPE'] as const
@@ -323,6 +347,7 @@ export function rewriteBuyerCliConstants(
     ['SOURCE_BRAND_NAME', brandName],
     ['TEMPLATE_REPOSITORY', 'OWNER/REPOSITORY'],
     ['DELIVERY_BASE_URL', 'https://releases.example.com'],
+    ['DOCS_BASE_URL', 'https://docs.example.com'],
     ['DELIVERY_URL_VARIABLE', `${buyerVariablePrefix}_DELIVERY_URL`],
     ['LICENSE_KEY_VARIABLE', `${buyerVariablePrefix}_LICENSE_KEY`],
     ['LICENSE_KEY_PREFIX', 'LICENSE-'],
@@ -344,6 +369,7 @@ export function rewriteBuyerCliConstants(
     CLI_PACKAGE_NAME,
     SOURCE_BRAND_NAME,
     DELIVERY_BASE_URL,
+    DOCS_BASE_URL,
     DELIVERY_URL_VARIABLE,
     LICENSE_KEY_VARIABLE,
     LICENSE_KEY_PREFIX,
@@ -447,6 +473,7 @@ export function isTemplatePathExcluded(relativePath: string): boolean {
     return true
   if (normalized === 'skills-lock.json') return true
   if (normalized === 'internal' || normalized.startsWith('internal/')) return true
+  if (normalized === 'marketing' || normalized.startsWith('marketing/')) return true
   if (normalized === '.github/workflows/internal-commercial.yml') return true
   if (normalized === 'apps/worker' || normalized.startsWith('apps/worker/')) return true
   if (parts.includes('dist') || parts.includes('out')) return true
@@ -457,6 +484,7 @@ export function isTemplatePathExcluded(relativePath: string): boolean {
   if (basename.includes('.tfstate') || /^gha-creds-.*\.json$/.test(basename)) return true
   if (normalized === 'PLAN.md' || normalized === 'comments.md') return true
   if (normalized === 'packages/create-app/src/cli-brand-contract.test.ts') return true
+  if (normalized === 'packages/create-app/src/commercial-contract.test.ts') return true
   if (normalized === 'packages/create-app/LICENSE') return true
   if (normalized === 'packages/create-app/README.md') return true
   if (normalized === 'apps/server/server') return true

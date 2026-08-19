@@ -2,7 +2,7 @@ import {execFile} from 'node:child_process'
 import {createHash} from 'node:crypto'
 import {cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
-import {basename, join, relative, resolve} from 'node:path'
+import {basename, dirname, join, relative, resolve} from 'node:path'
 import {promisify} from 'node:util'
 
 import {BUYER_CLI_NAME, BUYER_CLI_PACKAGE_NAME, CLI_NAME, CLI_PACKAGE_NAME} from './constants.js'
@@ -22,12 +22,14 @@ import {
   rewriteBuyerAgentInstructions,
   rewriteBuyerClaudeInstructions,
   rewriteBuyerCliConstants,
+  stripDistributionReadmeBootstrap,
   stripSellerOnlyRootScripts,
   rewriteBuyerReleaseInstructions,
   rewriteBuyerSetupInstructions,
   rewriteBrandContent,
   rewriteRootPackageName,
   rewriteScopeContent,
+  rewriteWorkerName,
   wrapBrandedJsxText,
   wrapLongNamedImports,
   type RewriteReport,
@@ -68,20 +70,45 @@ async function assertEmptyTarget(targetDirectory: string): Promise<void> {
   }
 }
 
+async function trackedTemplatePaths(sourceDirectory: string): Promise<Set<string> | undefined> {
+  const topLevel = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+    cwd: sourceDirectory,
+  })
+    .then(result => resolve(result.stdout.trim()))
+    .catch(() => undefined)
+  if (topLevel !== sourceDirectory) return undefined
+
+  const {stdout} = await execFileAsync('git', ['ls-files', '-z'], {
+    cwd: sourceDirectory,
+    maxBuffer: 64 * 1024 * 1024,
+  })
+  const tracked = new Set<string>()
+  for (const path of stdout.split('\0')) {
+    if (!path) continue
+    tracked.add(path)
+    for (let parent = dirname(path); parent !== '.'; parent = dirname(parent)) {
+      tracked.add(parent)
+    }
+  }
+  return tracked
+}
+
 async function copyLocalTemplate(source: string, target: string): Promise<void> {
   const sourceDirectory = resolve(source)
   const sourceStat = await lstat(sourceDirectory).catch(() => undefined)
   if (!sourceStat?.isDirectory())
     throw new Error(`Template path is not a directory: ${sourceDirectory}`)
 
-  await assertNoSymbolicLinks(sourceDirectory, sourceDirectory, true)
+  const tracked = await trackedTemplatePaths(sourceDirectory)
+  const isTemplatePathIncluded = (relativePath: string): boolean =>
+    relativePath === '' ||
+    (!isTemplatePathExcluded(relativePath) && (!tracked || tracked.has(relativePath)))
+
+  await assertNoSymbolicLinks(sourceDirectory, sourceDirectory, isTemplatePathIncluded)
   await mkdir(target, {recursive: true})
   await cp(sourceDirectory, target, {
     recursive: true,
-    filter: path => {
-      const relativePath = relative(sourceDirectory, path)
-      return relativePath === '' || !isTemplatePathExcluded(relativePath)
-    },
+    filter: path => isTemplatePathIncluded(relative(sourceDirectory, path).replaceAll('\\', '/')),
   })
   await assertNoSymbolicLinks(target)
 }
@@ -89,17 +116,17 @@ async function copyLocalTemplate(source: string, target: string): Promise<void> 
 async function assertNoSymbolicLinks(
   directory: string,
   root = directory,
-  skipExcludedPaths = false,
+  isIncluded?: (relativePath: string) => boolean,
 ): Promise<void> {
   const entries = await readdir(directory, {withFileTypes: true})
   for (const entry of entries) {
     const path = join(directory, entry.name)
-    const relativePath = relative(root, path)
-    if (skipExcludedPaths && isTemplatePathExcluded(relativePath)) continue
+    const relativePath = relative(root, path).replaceAll('\\', '/')
+    if (isIncluded && !isIncluded(relativePath)) continue
     if (entry.isSymbolicLink()) {
       throw new Error(`Template contains a symbolic link, which is not supported: ${path}`)
     }
-    if (entry.isDirectory()) await assertNoSymbolicLinks(path, root, skipExcludedPaths)
+    if (entry.isDirectory()) await assertNoSymbolicLinks(path, root, isIncluded)
   }
 }
 
@@ -234,6 +261,12 @@ async function applyBrandRewrite(target: string, brandName: string): Promise<Rew
   return report
 }
 
+async function renameFrontendWorker(target: string, appName: string): Promise<void> {
+  const workerPath = join(target, 'apps/web/wrangler.toml')
+  if (!(await stat(workerPath).catch(() => undefined))) return
+  await rewriteFile(workerPath, content => rewriteWorkerName(content, appName))
+}
+
 async function generateEnvironmentFiles(target: string, databasePort = 5432): Promise<void> {
   const serverExample = await readFile(join(target, 'apps/server/.env.example'), 'utf8')
   await writeFile(
@@ -250,8 +283,10 @@ async function generateEnvironmentFiles(target: string, databasePort = 5432): Pr
 async function neutralizeAgentInstructions(target: string): Promise<void> {
   const agentPath = join(target, 'AGENTS.md')
   const claudePath = join(target, 'CLAUDE.md')
+  const readmePath = join(target, 'README.md')
   await writeFile(agentPath, rewriteBuyerAgentInstructions(await readFile(agentPath, 'utf8')))
   await writeFile(claudePath, rewriteBuyerClaudeInstructions(await readFile(claudePath, 'utf8')))
+  await writeFile(readmePath, stripDistributionReadmeBootstrap(await readFile(readmePath, 'utf8')))
 
   const rootPackagePath = join(target, 'package.json')
   await writeFile(
@@ -373,6 +408,7 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldReport
     const packageReplacements = await rewriteFile(packagePath, content =>
       rewriteRootPackageName(content, options.appName),
     )
+    await renameFrontendWorker(target, options.appName)
     const scope = await applyScopeRewrite(target, options.scope)
     await neutralizeAgentInstructions(target)
     await neutralizeSourceCli(target, options.scope, options.brandName)

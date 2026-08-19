@@ -70,7 +70,7 @@ Create a buyer-owned SaaS application from your licensed ${suggestBrandName(CLI_
 Options:
   --license-key <key> Licence key from your purchase (or set ${LICENSE_KEY_VARIABLE})
   --source-version <version> Pin an immutable release (default: the latest you are entitled to)
-  --from <path>       Use a local source checkout (maintainer/testing)
+  --from <path>       Use a local Git checkout, tracked files only (maintainer/testing)
   --scope <namespace> Advanced workspace namespace override (default: derived from brand)
   --brand <name>      Display name (default: derived from app name)
   --yes               Accept recommended defaults for omitted options
