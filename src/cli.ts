@@ -182,7 +182,7 @@ export function suggestScope(brandName: string, fallbackAppName: string): string
   return namespace || fallbackAppName
 }
 
-async function unwrapPrompt<T>(value: T | symbol): Promise<T> {
+async function unwrapPrompt<T>(value: T | typeof prompts.CANCEL_SYMBOL): Promise<T> {
   if (prompts.isCancel(value)) {
     prompts.cancel('No project was created.')
     throw new CliCancelled()

@@ -1,6 +1,6 @@
 {
   "name": "superslate",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Create a production-oriented SaaS application from superslate.",
   "keywords": [
     "bun",
@@ -38,10 +38,10 @@
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
-    "@clack/prompts": "^1.7.0",
-    "@types/node": "^26.2.0",
+    "@clack/prompts": "^1.8.1",
+    "@types/node": "^26.6.5",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^5.0.5"
   },
   "engines": {
     "node": ">=20"

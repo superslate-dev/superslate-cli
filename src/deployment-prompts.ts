@@ -29,7 +29,7 @@ export interface DeploymentPromptDefaults {
 
 export class DeploymentPromptCancelled extends Error {}
 
-async function unwrap<T>(value: T | symbol): Promise<T> {
+async function unwrap<T>(value: T | typeof prompts.CANCEL_SYMBOL): Promise<T> {
   if (prompts.isCancel(value)) {
     prompts.cancel('Deployment configuration was not changed.')
     throw new DeploymentPromptCancelled()
