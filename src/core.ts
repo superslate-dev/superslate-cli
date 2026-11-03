@@ -56,6 +56,32 @@ export const BRAND_MANIFEST: readonly BrandManifestEntry[] = [
   {path: 'apps/server/email-templates/welcome-email.html', occurrences: 8},
 ] as const
 
+export const START_BRAND_MANIFEST: readonly BrandManifestEntry[] = [
+  {path: 'apps/start/AGENTS.md', occurrences: 1},
+  {path: 'apps/start/README.md', occurrences: 1},
+  {path: 'apps/start/src/server/config.ts', occurrences: 2},
+  {path: 'apps/start/src/shared/site.ts', occurrences: 1},
+  {path: 'apps/start/wrangler.jsonc', occurrences: 2},
+  {path: 'apps/start/worker-configuration.d.ts', occurrences: 2},
+] as const
+
+/**
+ * Everything the mobile edition owns. A tier without it must lose all of these and
+ * leave no reference behind: a dangling workspace entry or docs page would break the
+ * buyer's first `vp install --frozen-lockfile`.
+ */
+export const MOBILE_EDITION_PATHS = ['apps/mobile', 'docs/mobile.md'] as const
+
+export interface MobileIdentity {
+  displayName: string
+  slug: string
+  scheme: string
+  bundleIdentifier: string
+  appDomain?: string
+}
+
+export const UNIVERSAL_LINK_PATH_PREFIXES = ['/auth', '/invitations'] as const
+
 export interface RewriteResult {
   content: string
   replacements: number
@@ -127,6 +153,222 @@ export function rewriteBrandContent(content: string, brandName: string): Rewrite
     content: content.replace(sourceBrandPattern, () => brandName),
     replacements: matches.length,
   }
+}
+
+/**
+ * A URI scheme and an Android package segment are identifiers, not display text.
+ * The brand rewrite maps a source literal to an arbitrary display name, so
+ * "My App" would produce `My App://` and an invalid package name; both are derived
+ * from the validated kebab-case app name instead.
+ */
+export function mobileSchemeFor(appName: string): string {
+  const error = validateAppName(appName)
+  if (error) throw new Error(error)
+  return appName
+}
+
+export function androidPackageSegment(appName: string): string {
+  const segment = appName.replace(/[^a-z0-9]/g, '')
+  return /^[0-9]/.test(segment) || !segment ? `app${segment}` : segment
+}
+
+export function validateAppDomain(value: string): string | undefined {
+  if (!value.trim()) return 'Application domain cannot be empty.'
+  if (/^https?:\/\//.test(value)) return 'Use a bare host such as app.example.com, not a URL.'
+  if (value.includes('/')) return 'Use a bare host such as app.example.com, with no path.'
+  if (
+    !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(
+      value,
+    )
+  ) {
+    return 'Use a lowercase hostname with at least two labels, for example app.example.com.'
+  }
+  return undefined
+}
+
+export function validateBundleIdentifier(value: string): string | undefined {
+  if (!value.trim()) return 'Bundle identifier cannot be empty.'
+  if (!/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){2,}$/.test(value)) {
+    return 'Use at least three lowercase reverse-DNS segments, for example com.example.app.'
+  }
+  return undefined
+}
+
+export function deriveMobileIdentity(
+  appName: string,
+  brandName: string,
+  bundleIdentifier?: string,
+  appDomain?: string,
+): MobileIdentity {
+  const brandError = validateBrandName(brandName)
+  if (brandError) throw new Error(brandError)
+
+  const resolvedBundleId = bundleIdentifier ?? `com.${androidPackageSegment(appName)}.app`
+  const bundleError = validateBundleIdentifier(resolvedBundleId)
+  if (bundleError) throw new Error(bundleError)
+
+  const domain = appDomain?.trim().toLowerCase()
+  if (domain) {
+    const domainError = validateAppDomain(domain)
+    if (domainError) throw new Error(domainError)
+  }
+
+  return {
+    displayName: brandName,
+    slug: appName,
+    scheme: mobileSchemeFor(appName),
+    bundleIdentifier: resolvedBundleId,
+    ...(domain ? {appDomain: domain} : {}),
+  }
+}
+
+export function universalLinkConfig(domain: string): {
+  associatedDomains: string[]
+  intentFilters: unknown[]
+} {
+  return {
+    associatedDomains: [`applinks:${domain}`],
+    intentFilters: [
+      {
+        action: 'VIEW',
+        autoVerify: true,
+        category: ['BROWSABLE', 'DEFAULT'],
+        data: UNIVERSAL_LINK_PATH_PREFIXES.map(pathPrefix => ({
+          scheme: 'https',
+          host: domain,
+          pathPrefix,
+        })),
+      },
+    ],
+  }
+}
+
+/**
+ * Rewrites the Expo configuration as JSON rather than by text substitution: the
+ * display name is brand text while the slug, scheme, and identifiers are not, and
+ * a case-insensitive word replace cannot tell them apart. Any inherited EAS
+ * project or update URL is dropped — the buyer claims their own with `eas init`.
+ */
+export function rewriteMobileAppConfig(content: string, identity: MobileIdentity): string {
+  const parsed = JSON.parse(content) as {
+    expo: Record<string, unknown> & {
+      ios?: Record<string, unknown>
+      android?: Record<string, unknown>
+      extra?: Record<string, unknown>
+      updates?: unknown
+    }
+  }
+  const {expo} = parsed
+  if (!expo) throw new Error('Expo configuration is missing its "expo" block.')
+
+  expo.name = identity.displayName
+  expo.slug = identity.slug
+  expo.scheme = identity.scheme
+  if (expo.ios) expo.ios.bundleIdentifier = identity.bundleIdentifier
+  if (expo.android) expo.android.package = identity.bundleIdentifier
+
+  const links = identity.appDomain ? universalLinkConfig(identity.appDomain) : undefined
+  if (expo.ios) {
+    if (links) expo.ios.associatedDomains = links.associatedDomains
+    else delete expo.ios.associatedDomains
+  }
+  if (expo.android) {
+    if (links) expo.android.intentFilters = links.intentFilters
+    else delete expo.android.intentFilters
+  }
+
+  delete expo.updates
+  delete expo.owner
+  if (expo.extra && typeof expo.extra === 'object') delete (expo.extra as {eas?: unknown}).eas
+
+  return `${stringifyRepositoryJson(parsed)}\n`
+}
+
+export function rewriteMobileAppScheme(content: string, scheme: string): RewriteResult {
+  if (!/^MOBILE_APP_SCHEME=.*$/m.test(content)) {
+    throw new Error('Server .env.example must contain a MOBILE_APP_SCHEME entry.')
+  }
+  return {
+    content: content.replace(/^MOBILE_APP_SCHEME=.*$/m, `MOBILE_APP_SCHEME=${scheme}`),
+    replacements: 1,
+  }
+}
+
+const JSON_PRINT_WIDTH = 100
+
+function isJsonPrimitive(value: unknown): boolean {
+  return value === null || ['string', 'number', 'boolean'].includes(typeof value)
+}
+
+/**
+ * `JSON.stringify(_, null, 2)` is the right shape for a `package.json`, which the
+ * repository formatter prints with its stringify parser, but not for any other
+ * JSON file: there, an array of primitives that fits the print width stays on one
+ * line. Rewriting a `.json` file with plain stringify therefore leaves the buyer's
+ * project failing its own `vp check`.
+ */
+export function stringifyRepositoryJson(value: unknown, indent = 0, column = 0): string {
+  const pad = ' '.repeat(indent)
+  const innerPad = ' '.repeat(indent + 2)
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]'
+    if (value.every(isJsonPrimitive)) {
+      const inline = `[${value.map(item => JSON.stringify(item)).join(', ')}]`
+      if (column + inline.length <= JSON_PRINT_WIDTH) return inline
+    }
+    const items = value.map(
+      item => `${innerPad}${stringifyRepositoryJson(item, indent + 2, indent + 2)}`,
+    )
+    return `[\n${items.join(',\n')}\n${pad}]`
+  }
+
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value)
+    if (entries.length === 0) return '{}'
+    const items = entries.map(([key, item]) => {
+      const label = `${JSON.stringify(key)}: `
+      return `${innerPad}${label}${stringifyRepositoryJson(item, indent + 2, indent + 2 + label.length)}`
+    })
+    return `{\n${items.join(',\n')}\n${pad}}`
+  }
+
+  return JSON.stringify(value)
+}
+
+export function stripMobileRootScripts(content: string): string {
+  const parsed = JSON.parse(content) as {scripts?: Record<string, string>}
+  if (parsed.scripts) {
+    delete parsed.scripts['dev:mobile']
+    delete parsed.scripts['build:mobile']
+  }
+  return `${JSON.stringify(parsed, null, 2)}\n`
+}
+
+export function stripMobileKnipWorkspace(content: string): string {
+  const parsed = JSON.parse(content) as {workspaces?: Record<string, unknown>}
+  if (parsed.workspaces) delete parsed.workspaces['apps/mobile']
+  return `${stringifyRepositoryJson(parsed)}\n`
+}
+
+export function stripMobileDocsPage(content: string): string {
+  const parsed = JSON.parse(content) as {pages?: string[]}
+  if (Array.isArray(parsed.pages)) {
+    parsed.pages = parsed.pages.filter(page => page !== 'mobile')
+  }
+  return `${stringifyRepositoryJson(parsed)}\n`
+}
+
+export function stripMobileDocsSource(content: string): string {
+  return content.replace(/^\s*'mobile\.md',\n/m, '')
+}
+
+export function stripMobileDocsReferences(content: string): string {
+  return content
+    .replace(/^## Mobile edition\n[\s\S]*?(?=^## |(?![\s\S]))/m, '')
+    .replace(/^\| `apps\/mobile` .*\n/gm, '')
+    .replace(/^`apps\/mobile`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm, '')
+    .replace(/\[([^\]]+)\]\(\.\/mobile\.md(?:#[^)]*)?\)/g, '$1')
 }
 
 export function formatRewrittenPackageJson(content: string): string {
@@ -431,6 +673,16 @@ export function rewriteBuyerReleaseInstructions(content: string): string {
   return rewritten
 }
 
+export function generateStartDevVars(
+  example: string,
+  secret = randomBytes(32).toString('base64'),
+): string {
+  if (!/^BETTER_AUTH_SECRET=.*$/m.test(example)) {
+    throw new Error('apps/start/.dev.vars.example must contain a BETTER_AUTH_SECRET entry.')
+  }
+  return example.replace(/^BETTER_AUTH_SECRET=.*$/m, `BETTER_AUTH_SECRET=${secret}`)
+}
+
 export function generateServerEnv(
   example: string,
   secret = randomBytes(32).toString('hex'),
@@ -476,6 +728,11 @@ export function isTemplatePathExcluded(relativePath: string): boolean {
   if (normalized === 'marketing' || normalized.startsWith('marketing/')) return true
   if (normalized === '.github/workflows/internal-commercial.yml') return true
   if (normalized === 'apps/worker' || normalized.startsWith('apps/worker/')) return true
+  if (parts[0] === 'apps' && parts[1] === 'mobile') {
+    const mobileEntry = parts[2] ?? ''
+    if (['.expo', 'android', 'ios', 'credentials', 'dist-verify'].includes(mobileEntry)) return true
+  }
+  if (parts.includes('.wrangler')) return true
   if (parts.includes('dist') || parts.includes('out')) return true
   if (parts.includes('.next') || parts.includes('.source') || parts.includes('.turbo')) return true
   if (normalized === 'bun.lock') return true
@@ -489,6 +746,11 @@ export function isTemplatePathExcluded(relativePath: string): boolean {
   if (normalized === 'packages/create-app/README.md') return true
   if (normalized === 'apps/server/server') return true
   if (basename.endsWith('.tsbuildinfo')) return true
+  if (
+    basename === '.dev.vars' ||
+    (basename.startsWith('.dev.vars.') && basename !== '.dev.vars.example')
+  )
+    return true
   if (basename === '.env' || (basename.startsWith('.env.') && basename !== '.env.example'))
     return true
   return false

@@ -1,6 +1,17 @@
 import {execFile} from 'node:child_process'
 import {createHash} from 'node:crypto'
-import {cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises'
+import {
+  cp,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises'
 import {tmpdir} from 'node:os'
 import {basename, dirname, join, relative, resolve} from 'node:path'
 import {promisify} from 'node:util'
@@ -9,14 +20,42 @@ import {BUYER_CLI_NAME, BUYER_CLI_PACKAGE_NAME, CLI_NAME, CLI_PACKAGE_NAME} from
 import {
   deliveryBaseUrl,
   downloadAsset,
+  entitledSelection,
   releaseAssetNames,
+  resolveEdition,
   resolveRelease,
   type DownloadProgress,
 } from './delivery.js'
 import {
+  normalizeEditions,
+  pruneLockfileImporters,
+  rewriteStartWorkerIdentifiers,
+  selectedEditions,
+  START_EDITION_OVERLAY,
+  START_EDITION_PATHS,
+  START_ONLY_KEPT_PATHS,
+  START_ROOT_CONTRACTS,
+  startOnlyRootPackage,
+  stripKnipWorkspaces,
+  stripStartReferences,
+  type EditionName,
+  type EditionSelection,
+} from './editions.js'
+import {
   BRAND_MANIFEST,
+  START_BRAND_MANIFEST,
+  deriveMobileIdentity,
   formatRewrittenPackageJson,
   generateServerEnv,
+  generateStartDevVars,
+  MOBILE_EDITION_PATHS,
+  rewriteMobileAppConfig,
+  rewriteMobileAppScheme,
+  stripMobileDocsPage,
+  stripMobileDocsReferences,
+  stripMobileDocsSource,
+  stripMobileKnipWorkspace,
+  stripMobileRootScripts,
   isScopeRewriteFile,
   isTemplatePathExcluded,
   rewriteBuyerAgentInstructions,
@@ -48,6 +87,16 @@ export interface ScaffoldOptions {
   initializeGit: boolean
   databasePort?: number
   onDownloadProgress?: DownloadProgress
+  /**
+   * Which editions ship. Left undefined, a licensed run takes what the licence
+   * entitles, and a local `--from` run defaults to the web foundation alone, so an
+   * edition is never granted by accident.
+   */
+  includeWeb?: boolean
+  includeMobile?: boolean
+  includeStart?: boolean
+  mobileBundleIdentifier?: string
+  mobileAppDomain?: string
 }
 
 export interface ScaffoldReport {
@@ -55,6 +104,8 @@ export interface ScaffoldReport {
   packageName: RewriteReport
   scope: RewriteReport
   brand: RewriteReport
+  editions: EditionName[]
+  mobile: boolean
 }
 
 async function assertEmptyTarget(targetDirectory: string): Promise<void> {
@@ -160,14 +211,48 @@ export function verifyReleaseMetadata(
   }
 }
 
+type RequestedEditions = Partial<EditionSelection>
+
+function chooseEditions(
+  requested: RequestedEditions,
+  entitled: EditionSelection | undefined,
+): EditionSelection {
+  const choose = (edition: EditionName, localDefault: boolean) =>
+    entitled
+      ? resolveEdition(edition, {
+          requested: requested[edition],
+          entitled: entitled[edition],
+          licensed: true,
+        })
+      : (requested[edition] ?? localDefault)
+
+  const selection = normalizeEditions({
+    web: choose('web', true),
+    mobile: choose('mobile', false),
+    start: choose('start', false),
+  })
+  if (requested.web === false && selection.mobile) {
+    throw new Error(
+      'The mobile edition ships with the web foundation it runs on. Drop --no-web, or add --no-mobile.',
+    )
+  }
+  if (selectedEditions(selection).length === 0) {
+    throw new Error('Nothing to scaffold: every edition was excluded.')
+  }
+  return selection
+}
+
 async function downloadLicensedTemplate(
   target: string,
   licenseKey: string,
+  requested: RequestedEditions,
   sourceVersion?: string,
   onDownloadProgress?: DownloadProgress,
-): Promise<void> {
+): Promise<EditionSelection> {
   const baseUrl = deliveryBaseUrl()
-  const releaseTag = sourceVersion ?? (await resolveRelease(licenseKey, baseUrl)).latest
+  const index = await resolveRelease(licenseKey, baseUrl)
+  const selection = chooseEditions(requested, entitledSelection(index))
+  const releaseTag = sourceVersion ?? index.latest
   const {artifact, checksum: checksumName, manifest: manifestName} = releaseAssetNames(releaseTag)
 
   const temporaryDirectory = await mkdtemp(join(tmpdir(), `${CLI_NAME}-`))
@@ -195,6 +280,7 @@ async function downloadLicensedTemplate(
     await mkdir(extractedPath)
     await execFileAsync('tar', ['-xzf', archivePath, '-C', extractedPath, '--strip-components=1'])
     await copyLocalTemplate(extractedPath, target)
+    return selection
   } finally {
     await rm(temporaryDirectory, {recursive: true, force: true})
   }
@@ -246,8 +332,9 @@ async function applyScopeRewrite(target: string, scope: string): Promise<Rewrite
 
 async function applyBrandRewrite(target: string, brandName: string): Promise<RewriteReport> {
   const report = {files: 0, replacements: 0}
-  for (const entry of BRAND_MANIFEST) {
+  for (const entry of [...BRAND_MANIFEST, ...START_BRAND_MANIFEST]) {
     const path = join(target, entry.path)
+    if (!(await exists(path))) continue
     const replacements = await rewriteFile(path, content => {
       const result = rewriteBrandContent(content, brandName)
       if (result.replacements > 0 && path.endsWith('.tsx')) {
@@ -261,10 +348,165 @@ async function applyBrandRewrite(target: string, brandName: string): Promise<Rew
   return report
 }
 
+async function rewriteJsonFile(path: string, rewrite: (content: string) => string) {
+  await writeFile(path, rewrite(await readFile(path, 'utf8')))
+}
+
+async function exists(path: string): Promise<boolean> {
+  return Boolean(await lstat(path).catch(() => undefined))
+}
+
+async function rewriteIfPresent(path: string, rewrite: (content: string) => string): Promise<void> {
+  const content = await readFile(path, 'utf8').catch(() => undefined)
+  if (content === undefined) return
+  const rewritten = rewrite(content)
+  if (rewritten !== content) await writeFile(path, rewritten)
+}
+
+async function markdownDocuments(target: string): Promise<string[]> {
+  const pages = await readdir(join(target, 'docs'), {recursive: true}).catch(() => [] as string[])
+  return [
+    'AGENTS.md',
+    ...pages.filter(page => page.endsWith('.md')).map(page => join('docs', page)),
+  ]
+}
+
+async function applyMobileIdentity(
+  target: string,
+  appName: string,
+  brandName: string,
+  bundleIdentifier?: string,
+  appDomain?: string,
+): Promise<void> {
+  const identity = deriveMobileIdentity(appName, brandName, bundleIdentifier, appDomain)
+
+  await rewriteJsonFile(join(target, 'apps/mobile/app.json'), content =>
+    rewriteMobileAppConfig(content, identity),
+  )
+  await rewriteFile(join(target, 'apps/server/.env.example'), content =>
+    rewriteMobileAppScheme(content, identity.scheme),
+  )
+}
+
+/**
+ * A tier without the mobile edition must produce a project that installs and
+ * verifies exactly like one that never had it, so every reference goes with the
+ * directory: root scripts, the knip workspace, the docs page, its site entry and
+ * every link to it, and the lockfile importer pnpm compares against the workspace on disk.
+ */
+async function removeMobileEdition(target: string): Promise<void> {
+  for (const path of MOBILE_EDITION_PATHS) {
+    await rm(join(target, path), {recursive: true, force: true})
+  }
+
+  await rewriteIfPresent(join(target, 'package.json'), stripMobileRootScripts)
+  await rewriteIfPresent(join(target, 'knip.json'), stripMobileKnipWorkspace)
+  await rewriteIfPresent(join(target, 'docs/meta.json'), stripMobileDocsPage)
+  for (const page of await markdownDocuments(target)) {
+    await rewriteIfPresent(join(target, page), stripMobileDocsReferences)
+  }
+  await rewriteIfPresent(join(target, 'apps/docs/lib/source.ts'), stripMobileDocsSource)
+  await rewriteIfPresent(join(target, 'pnpm-lock.yaml'), content =>
+    pruneLockfileImporters(content, ['apps/mobile']),
+  )
+}
+
+async function removeStartEdition(target: string): Promise<void> {
+  for (const path of START_EDITION_PATHS) {
+    await rm(join(target, path), {recursive: true, force: true})
+  }
+
+  await rewriteIfPresent(join(target, 'knip.json'), content =>
+    stripKnipWorkspaces(content, ['apps/start']),
+  )
+  for (const page of await markdownDocuments(target)) {
+    await rewriteIfPresent(join(target, page), stripStartReferences)
+  }
+  await rewriteIfPresent(join(target, 'pnpm-lock.yaml'), content =>
+    pruneLockfileImporters(content, ['apps/start']),
+  )
+}
+
+async function pruneToKeptPaths(
+  target: string,
+  relativeDirectory: string,
+  kept: ReadonlySet<string>,
+  removedWorkspaces: string[],
+): Promise<void> {
+  for (const entry of await readdir(join(target, relativeDirectory))) {
+    const relativePath = relativeDirectory ? `${relativeDirectory}/${entry}` : entry
+    if (kept.has(relativePath)) continue
+    if ([...kept].some(path => path.startsWith(`${relativePath}/`))) {
+      await pruneToKeptPaths(target, relativePath, kept, removedWorkspaces)
+      continue
+    }
+    if (relativeDirectory === 'apps' || relativeDirectory === 'packages') {
+      removedWorkspaces.push(relativePath)
+    }
+    await rm(join(target, relativePath), {recursive: true, force: true})
+  }
+}
+
+/**
+ * The Start edition on its own is the Start app, the two workspace packages it
+ * imports, and a root written for it. The root files live in the edition
+ * overlay so they are reviewed as files rather than assembled from fragments.
+ */
+async function reduceToStartEdition(target: string): Promise<void> {
+  const overlay = join(target, START_EDITION_OVERLAY)
+  const overlayPackage = await readFile(join(overlay, 'package.json'), 'utf8')
+  const rootPackage = await readFile(join(target, 'package.json'), 'utf8')
+
+  const removedWorkspaces: string[] = []
+  await pruneToKeptPaths(target, '', new Set(START_ONLY_KEPT_PATHS), removedWorkspaces)
+
+  await cp(overlay, target, {recursive: true, force: true})
+  await writeFile(join(target, 'package.json'), startOnlyRootPackage(rootPackage, overlayPackage))
+  for (const [overlayName, rootName] of Object.entries(START_ROOT_CONTRACTS)) {
+    await rename(join(target, overlayName), join(target, rootName))
+  }
+  await rm(overlay, {recursive: true, force: true})
+
+  await rewriteIfPresent(join(target, 'knip.json'), content =>
+    stripKnipWorkspaces(content, removedWorkspaces),
+  )
+  await rewriteIfPresent(join(target, 'pnpm-lock.yaml'), content =>
+    pruneLockfileImporters(content, removedWorkspaces),
+  )
+}
+
+async function isStartOnlyTree(target: string): Promise<boolean> {
+  return (await exists(join(target, 'apps/start'))) && !(await exists(join(target, 'apps/server')))
+}
+
+/** @public */
+export async function assembleEditions(
+  target: string,
+  selection: EditionSelection,
+  {keepStartOverlay = false}: {keepStartOverlay?: boolean} = {},
+): Promise<void> {
+  if (!selection.mobile) await removeMobileEdition(target)
+  if (!selection.start) await removeStartEdition(target)
+  if (!selection.web && !(await isStartOnlyTree(target))) await reduceToStartEdition(target)
+  if (!keepStartOverlay)
+    await rm(join(target, START_EDITION_OVERLAY), {recursive: true, force: true})
+}
+
+async function applyStartIdentity(target: string, appName: string): Promise<void> {
+  await rewriteIfPresent(join(target, 'apps/start/wrangler.jsonc'), content =>
+    rewriteStartWorkerIdentifiers(content, appName),
+  )
+}
+
 async function renameFrontendWorker(target: string, appName: string): Promise<void> {
   const workerPath = join(target, 'apps/web/wrangler.toml')
   if (!(await stat(workerPath).catch(() => undefined))) return
   await rewriteFile(workerPath, content => rewriteWorkerName(content, appName))
+}
+
+async function generateStartEnvironment(target: string): Promise<void> {
+  const example = await readFile(join(target, 'apps/start/.dev.vars.example'), 'utf8')
+  await writeFile(join(target, 'apps/start/.dev.vars'), generateStartDevVars(example))
 }
 
 async function generateEnvironmentFiles(target: string, databasePort = 5432): Promise<void> {
@@ -392,11 +634,20 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldReport
   await assertEmptyTarget(target)
 
   try {
-    if (options.from) await copyLocalTemplate(options.from, target)
-    else if (options.licenseKey) {
-      await downloadLicensedTemplate(
+    const requested: RequestedEditions = {
+      web: options.includeWeb,
+      mobile: options.includeMobile,
+      start: options.includeStart,
+    }
+    let selection: EditionSelection
+    if (options.from) {
+      selection = chooseEditions(requested, undefined)
+      await copyLocalTemplate(options.from, target)
+    } else if (options.licenseKey) {
+      selection = await downloadLicensedTemplate(
         target,
         options.licenseKey,
+        requested,
         options.sourceVersion,
         options.onDownloadProgress,
       )
@@ -404,16 +655,31 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldReport
       throw new Error(`A local source path or a ${CLI_NAME} licence key is required.`)
     }
 
+    await assembleEditions(target, selection)
+    if (selection.mobile) {
+      await applyMobileIdentity(
+        target,
+        options.appName,
+        options.brandName,
+        options.mobileBundleIdentifier,
+        options.mobileAppDomain,
+      )
+    }
+    if (selection.start) await applyStartIdentity(target, options.appName)
+
     const packagePath = join(target, 'package.json')
     const packageReplacements = await rewriteFile(packagePath, content =>
       rewriteRootPackageName(content, options.appName),
     )
     await renameFrontendWorker(target, options.appName)
     const scope = await applyScopeRewrite(target, options.scope)
-    await neutralizeAgentInstructions(target)
-    await neutralizeSourceCli(target, options.scope, options.brandName)
+    if (selection.web) {
+      await neutralizeAgentInstructions(target)
+      await neutralizeSourceCli(target, options.scope, options.brandName)
+    }
     const brand = await applyBrandRewrite(target, options.brandName)
-    await generateEnvironmentFiles(target, options.databasePort)
+    if (selection.web) await generateEnvironmentFiles(target, options.databasePort)
+    if (selection.start) await generateStartEnvironment(target)
     if (options.initializeGit) await initializeRepository(target)
 
     return {
@@ -421,6 +687,8 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldReport
       packageName: {files: packageReplacements > 0 ? 1 : 0, replacements: packageReplacements},
       scope,
       brand,
+      editions: selectedEditions(selection),
+      mobile: selection.mobile,
     }
   } catch (error) {
     if ((await stat(target).catch(() => undefined))?.isDirectory()) {

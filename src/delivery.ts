@@ -11,10 +11,18 @@ import {
   LICENSE_KEY_PREFIX,
   LICENSE_KEY_VARIABLE,
 } from './constants.js'
+import {selectionFromEditions, type EditionSelection} from './editions.js'
 
 export interface ReleaseIndex {
   latest: string
   versions: string[]
+  /**
+   * Editions the licence entitles this buyer to. A delivery service that predates
+   * per-edition sales lists only add-ons beyond the web foundation, or nothing, so
+   * a list naming neither `web` nor `start` reads as the foundation plus those
+   * add-ons. A missing entitlement must never grant one.
+   */
+  editions?: string[]
 }
 
 export interface ReleaseAssetNames {
@@ -44,6 +52,39 @@ export function validateLicenseKey(value: string): string | undefined {
     return `A ${CLI_NAME} licence key starts with ${LICENSE_KEY_PREFIX}. Copy it from your purchase receipt or the customer portal.`
   }
   return undefined
+}
+
+export function entitledEditions(index: Pick<ReleaseIndex, 'editions'>): string[] {
+  if (!Array.isArray(index.editions)) return []
+  return index.editions.filter(edition => typeof edition === 'string' && edition.trim())
+}
+
+export function entitledSelection(index: Pick<ReleaseIndex, 'editions'>): EditionSelection {
+  const editions = entitledEditions(index)
+  const namesBaseEdition = editions.includes('web') || editions.includes('start')
+  return selectionFromEditions(namesBaseEdition ? editions : ['web', ...editions])
+}
+
+export interface EditionRequest {
+  requested?: boolean
+  entitled: boolean
+  licensed: boolean
+}
+
+export class EditionNotLicensedError extends Error {
+  constructor(edition: string) {
+    super(
+      `Your licence does not include the ${edition} edition. Drop --${edition} to continue, or contact support if you purchased it.`,
+    )
+    this.name = 'EditionNotLicensedError'
+  }
+}
+
+export function resolveEdition(edition: string, request: EditionRequest): boolean {
+  if (!request.licensed) return request.requested ?? false
+  if (request.requested === false) return false
+  if (request.requested && !request.entitled) throw new EditionNotLicensedError(edition)
+  return request.entitled
 }
 
 export function readLicenseKeyFromEnvironment(

@@ -26,11 +26,17 @@ import {
   parseStorageProvider,
   type DeploymentSelection,
 } from './deployment.js'
+import type {EditionName} from './editions.js'
 import {scaffold} from './scaffold.js'
 
 export interface Arguments {
   appName?: string
   from?: string
+  includeWeb?: boolean
+  includeMobile?: boolean
+  includeStart?: boolean
+  mobileBundleIdentifier?: string
+  mobileAppDomain?: string
   licenseKey?: string
   sourceVersion?: string
   scope?: string
@@ -48,6 +54,11 @@ export interface Arguments {
 export interface CliOptions {
   appName: string
   from?: string
+  includeWeb?: boolean
+  includeMobile?: boolean
+  includeStart?: boolean
+  mobileBundleIdentifier?: string
+  mobileAppDomain?: string
   licenseKey?: string
   sourceVersion?: string
   scope: string
@@ -71,6 +82,15 @@ Options:
   --license-key <key> Licence key from your purchase (or set ${LICENSE_KEY_VARIABLE})
   --source-version <version> Pin an immutable release (default: the latest you are entitled to)
   --from <path>       Use a local Git checkout, tracked files only (maintainer/testing)
+  --web / --no-web    Include or exclude the web foundation: the React app and the API
+  --mobile / --no-mobile Include or exclude the mobile edition, which ships with the web
+                      foundation it runs on
+  --start-edition / --no-start-edition Include or exclude the TanStack Start edition
+                      Editions default to whatever your licence entitles you to;
+                      --from defaults to the web foundation alone
+  --bundle-id <id>    Reverse-DNS iOS/Android identifier (default: com.<app-name>.app)
+  --app-domain <host> Host serving your web app, wired as an iOS/Android universal link
+                      so emailed sign-in and invite links open the app (default: none)
   --scope <namespace> Advanced workspace namespace override (default: derived from brand)
   --brand <name>      Display name (default: derived from app name)
   --yes               Accept recommended defaults for omitted options
@@ -114,7 +134,17 @@ export function parseArguments(argv: string[]): Arguments {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === '--from') parsed.from = takeValue(argv, index++, argument)
-    else if (argument === '--license-key') parsed.licenseKey = takeValue(argv, index++, argument)
+    else if (argument === '--web') parsed.includeWeb = true
+    else if (argument === '--no-web') parsed.includeWeb = false
+    else if (argument === '--start-edition') parsed.includeStart = true
+    else if (argument === '--no-start-edition') parsed.includeStart = false
+    else if (argument === '--mobile') parsed.includeMobile = true
+    else if (argument === '--no-mobile') parsed.includeMobile = false
+    else if (argument === '--bundle-id') {
+      parsed.mobileBundleIdentifier = takeValue(argv, index++, argument)
+    } else if (argument === '--app-domain') {
+      parsed.mobileAppDomain = takeValue(argv, index++, argument)
+    } else if (argument === '--license-key') parsed.licenseKey = takeValue(argv, index++, argument)
     else if (argument === '--source-version') {
       parsed.sourceVersion = normalizeSourceVersion(takeValue(argv, index++, argument))
     } else if (argument === '--scope') parsed.scope = takeValue(argv, index++, argument)
@@ -294,7 +324,7 @@ async function collectOptions(parsed: Arguments): Promise<CliOptions> {
 
   const setupDeployment =
     parsed.setupDeployment ??
-    (parsed.yes
+    (parsed.yes || parsed.includeWeb === false
       ? false
       : await unwrapPrompt(
           await prompts.confirm({
@@ -317,6 +347,11 @@ async function collectOptions(parsed: Arguments): Promise<CliOptions> {
     installDependencies,
     startDevelopment,
     deployment,
+    includeWeb: parsed.includeWeb,
+    includeMobile: parsed.includeMobile,
+    includeStart: parsed.includeStart,
+    mobileBundleIdentifier: parsed.mobileBundleIdentifier,
+    mobileAppDomain: parsed.mobileAppDomain,
   }
 }
 
@@ -503,7 +538,7 @@ async function runStep<T>(
 
 async function createApplication(
   options: CliOptions,
-): Promise<{target: string; databasePort: number}> {
+): Promise<{target: string; databasePort: number; editions: EditionName[]}> {
   const target = resolve(process.cwd(), options.appName)
   await assertTargetAvailable(target)
   assertSiblingTarget(options.from, target)
@@ -515,7 +550,7 @@ async function createApplication(
   const reporter = createScaffoldReporter(preparing, Boolean(options.licenseKey))
 
   try {
-    await runStep(
+    const report = await runStep(
       preparing,
       'Application source prepared',
       () =>
@@ -530,10 +565,15 @@ async function createApplication(
           initializeGit: options.initializeGit,
           databasePort,
           onDownloadProgress: reporter.onDownloadProgress,
+          includeWeb: options.includeWeb,
+          includeMobile: options.includeMobile,
+          includeStart: options.includeStart,
+          mobileBundleIdentifier: options.mobileBundleIdentifier,
+          mobileAppDomain: options.mobileAppDomain,
         }),
       reporter.handle,
     )
-    if (options.deployment) {
+    if (options.deployment && report.editions.includes('web')) {
       await runStep(
         'Configuring deployment',
         'Deployment target locked',
@@ -552,7 +592,7 @@ async function createApplication(
 
     if (await stat(target).catch(() => undefined)) await rmdir(target)
     await rename(staging, target)
-    return {target, databasePort}
+    return {target, databasePort, editions: report.editions}
   } catch (error) {
     await rm(staging, {recursive: true, force: true})
     throw error
@@ -563,6 +603,7 @@ function completionDetails(
   target: string,
   options: CliOptions,
   databasePort: number,
+  editions: readonly EditionName[],
 ): {
   directory: string
   commands: string
@@ -570,9 +611,10 @@ function completionDetails(
 } {
   const targetName = relative(process.cwd(), target) || options.appName
   const install = options.installDependencies ? [] : ['vp install --frozen-lockfile']
+  const run = editions.includes('web') ? ['pnpm dev'] : ['pnpm db:migrate', 'pnpm dev']
   return {
     directory: `./${targetName}`,
-    commands: [`cd ${targetName}`, ...install, 'pnpm dev'].join('\n'),
+    commands: [`cd ${targetName}`, ...install, ...run].join('\n'),
     database: `Postgres  localhost:${databasePort}`,
   }
 }
@@ -606,14 +648,34 @@ async function main(): Promise<void> {
 
   prompts.intro(`${suggestBrandName(CLI_NAME)} ${version} · production SaaS foundation`)
   const options = await collectOptions(parsed)
-  const {target, databasePort} = await createApplication(options)
-  const completion = completionDetails(target, options, databasePort)
+  const {target, databasePort, editions} = await createApplication(options)
+  const completion = completionDetails(target, options, databasePort, editions)
   prompts.log.success(`Created ${completion.directory}`)
+  if (!editions.includes('web')) {
+    prompts.log.step('Run locally')
+    prompts.log.info(
+      'Start     http://localhost:3003. apps/start/.dev.vars holds a fresh auth secret.\n          Deploy with `pnpm deploy:worker`; see apps/start/docs/deploy.md.',
+    )
+    prompts.outro(`${options.brandName} is ready.`)
+    printRunnableCommands(completion.commands)
+    return
+  }
+  const mobile = editions.includes('mobile')
   if (!options.startDevelopment) {
     prompts.log.step('Run locally')
     prompts.log.info(
       `Web       http://localhost:5173\nAPI       http://localhost:8000\n${completion.database}`,
     )
+    if (editions.includes('start')) {
+      prompts.log.info(
+        'Start     vp run --filter ./apps/start dev — http://localhost:3003. See apps/start/README.md.',
+      )
+    }
+    if (mobile) {
+      prompts.log.info(
+        'Mobile    pnpm dev:mobile — run `npx eas init` inside apps/mobile to claim your own\n          Expo project before the first build. See docs/mobile.md.',
+      )
+    }
     if (options.deployment) {
       prompts.log.info(
         `Deployment ${options.deployment.cloud.toUpperCase()} + ${options.deployment.storageProvider} + ${options.deployment.frontendTarget} locked. Review deployment/README.md.`,
