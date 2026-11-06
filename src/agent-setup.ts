@@ -3,6 +3,9 @@ import {mkdir, readFile, rename, stat, writeFile} from 'node:fs/promises'
 import {dirname, join, resolve} from 'node:path'
 import {runCaptured, which} from './runtime.js'
 
+const CODEX_AGENT_DOCS_TABLE_RE = /^\[mcp_servers\.(?:agent-docs|agent_docs|"agent-docs")\]$/m
+const LINE_BREAK_RE = /\r?\n/
+
 export type AgentClient = 'codex' | 'claude' | 'cursor'
 
 export interface AgentSetupArguments {
@@ -109,7 +112,7 @@ export function mergeCodexConfig(existing: string, root: string): string {
     const after = end + CODEX_END.length
     return `${existing.slice(0, start).trimEnd()}\n\n${managed}${existing.slice(after)}`.trimStart()
   }
-  if (/^\[mcp_servers\.(?:agent-docs|agent_docs|"agent-docs")\]$/m.test(existing)) {
+  if (CODEX_AGENT_DOCS_TABLE_RE.test(existing)) {
     throw new Error('Codex already has an unmanaged agent-docs server; remove or rename it first.')
   }
   return `${existing.trimEnd()}${existing.trim() ? '\n\n' : ''}${managed}\n`
@@ -170,11 +173,11 @@ async function addGitInfoExcludes(root: string, paths: string[]): Promise<boolea
   if (!rawPath) return false
   const excludePath = resolve(root, rawPath)
   const existing = await readFile(excludePath, 'utf8').catch(() => '')
-  const missing = paths.filter(path => !existing.split(/\r?\n/).includes(path))
+  const missing = paths.filter(path => !existing.split(LINE_BREAK_RE).includes(path))
   if (missing.length === 0) return true
   const prefix = existing && !existing.endsWith('\n') ? '\n' : ''
   const marker = '# Local agent configuration'
-  const heading = existing.split(/\r?\n/).includes(marker) ? '' : `${marker}\n`
+  const heading = existing.split(LINE_BREAK_RE).includes(marker) ? '' : `${marker}\n`
   await atomicWrite(excludePath, `${existing}${prefix}${heading}${missing.join('\n')}\n`)
   return true
 }

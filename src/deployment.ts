@@ -1,6 +1,11 @@
 import {mkdir, readFile, rm, stat, writeFile} from 'node:fs/promises'
 import {join} from 'node:path'
 
+const DEPLOYMENT_ENVIRONMENT_RE = /^[a-z][a-z0-9-]{1,30}$/
+const REGION_RE = /^[a-z0-9][a-z0-9-]{1,31}$/
+const DOMAIN_RE =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+
 export const deploymentClouds = ['aws', 'gcp', 'azure'] as const
 export const frontendTargets = ['native', 'vercel', 'cloudflare'] as const
 export const storageProviders = ['r2', 's3', 'gcs'] as const
@@ -82,26 +87,21 @@ export function parseStorageProvider(value: string): StorageProvider {
 }
 
 export function validateDeploymentEnvironment(value: string): string | undefined {
-  if (!/^[a-z][a-z0-9-]{1,30}$/.test(value)) {
+  if (!DEPLOYMENT_ENVIRONMENT_RE.test(value)) {
     return 'Environment must use 2-31 lowercase letters, numbers, or hyphens.'
   }
   return undefined
 }
 
 export function validateRegion(value: string): string | undefined {
-  if (!/^[a-z0-9][a-z0-9-]{1,31}$/.test(value)) {
+  if (!REGION_RE.test(value)) {
     return 'Region must use 2-32 lowercase letters, numbers, or hyphens.'
   }
   return undefined
 }
 
 export function validateDomain(value: string): string | undefined {
-  if (
-    value.length > 80 ||
-    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(
-      value,
-    )
-  ) {
+  if (value.length > 80 || !DOMAIN_RE.test(value)) {
     return 'Enter a lowercase hostname such as api.example.com, without a protocol or path.'
   }
   return undefined

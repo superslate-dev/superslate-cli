@@ -1,5 +1,13 @@
 import {stringifyRepositoryJson} from './core.js'
 
+const NON_INDENTED_LINE_RE = /^\S/
+const IMPORTER_KEY_LINE_RE = /^ {2}(\S[^:]*):\s*$/
+const EXTRA_BLANK_LINES_RE = /\n{3,}/g
+const START_TABLE_ROW_RE = /^\| `apps\/start` .*\n/gm
+const START_PARAGRAPH_RE = /^`apps\/start`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm
+const WORKER_NAME_FIELD_RE = /("name":\s*")[^"]+(")/
+const DATABASE_NAME_FIELD_RE = /("database_name":\s*")[^"]+(")/
+
 export const EDITION_NAMES = ['web', 'mobile', 'start'] as const
 
 export type EditionName = (typeof EDITION_NAMES)[number]
@@ -17,6 +25,7 @@ export const START_ROOT_CONTRACTS = {
 
 export const START_ONLY_KEPT_PATHS = [
   'apps/start',
+  'apps/site',
   'packages/billing',
   'packages/tsconfig',
   '.github/workflows/deploy-start.yml',
@@ -87,21 +96,21 @@ export function pruneLockfileImporters(
   let skipping = false
 
   for (const line of lines) {
-    if (/^\S/.test(line)) {
+    if (NON_INDENTED_LINE_RE.test(line)) {
       inImporters = line === 'importers:'
       skipping = false
       output.push(line)
       continue
     }
     if (inImporters) {
-      const importer = line.match(/^ {2}(\S[^:]*):\s*$/)?.[1]
+      const importer = line.match(IMPORTER_KEY_LINE_RE)?.[1]
       if (importer !== undefined) skipping = removed.has(importer)
       if (skipping) continue
     }
     output.push(line)
   }
 
-  return output.join('\n').replace(/\n{3,}/g, '\n\n')
+  return output.join('\n').replace(EXTRA_BLANK_LINES_RE, '\n\n')
 }
 
 export function stripKnipWorkspaces(content: string, removedWorkspaces: readonly string[]): string {
@@ -119,15 +128,13 @@ export function stripKnipWorkspaces(content: string, removedWorkspaces: readonly
 }
 
 export function stripStartReferences(content: string): string {
-  return content
-    .replace(/^\| `apps\/start` .*\n/gm, '')
-    .replace(/^`apps\/start`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm, '')
+  return content.replace(START_TABLE_ROW_RE, '').replace(START_PARAGRAPH_RE, '')
 }
 
 export function rewriteStartWorkerIdentifiers(content: string, appName: string): string {
   return content
-    .replace(/("name":\s*")[^"]+(")/, `$1${appName}$2`)
-    .replace(/("database_name":\s*")[^"]+(")/, `$1${appName}$2`)
+    .replace(WORKER_NAME_FIELD_RE, `$1${appName}$2`)
+    .replace(DATABASE_NAME_FIELD_RE, `$1${appName}$2`)
 }
 
 export function startOnlyRootPackage(rootPackage: string, overlayPackage: string): string {

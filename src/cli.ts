@@ -29,6 +29,10 @@ import {
 import type {EditionName} from './editions.js'
 import {scaffold} from './scaffold.js'
 
+const COMBINING_MARK_RE = /\p{Mark}/gu
+const NON_ALPHANUMERIC_RE = /[^a-z0-9]+/g
+const OUTER_DASHES_RE = /^-+|-+$/g
+
 export interface Arguments {
   appName?: string
   from?: string
@@ -205,10 +209,10 @@ export function suggestBrandName(appName: string): string {
 export function suggestScope(brandName: string, fallbackAppName: string): string {
   const namespace = brandName
     .normalize('NFKD')
-    .replace(/\p{Mark}/gu, '')
+    .replace(COMBINING_MARK_RE, '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
+    .replace(NON_ALPHANUMERIC_RE, '-')
+    .replace(OUTER_DASHES_RE, '')
   return namespace || fallbackAppName
 }
 

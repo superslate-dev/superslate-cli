@@ -13,6 +13,9 @@ import {
 } from './constants.js'
 import {selectionFromEditions, type EditionSelection} from './editions.js'
 
+const TRAILING_SLASHES_RE = /\/+$/
+const WHITESPACE_CHAR_RE = /\s/
+
 export interface ReleaseIndex {
   latest: string
   versions: string[]
@@ -41,13 +44,13 @@ export function deliveryBaseUrl(
   environment: Record<string, string | undefined> = process.env,
 ): string {
   const configured = environment[DELIVERY_URL_VARIABLE]?.trim()
-  return (configured || DELIVERY_BASE_URL).replace(/\/+$/, '')
+  return (configured || DELIVERY_BASE_URL).replace(TRAILING_SLASHES_RE, '')
 }
 
 export function validateLicenseKey(value: string): string | undefined {
   const key = value.trim()
   if (!key) return 'Enter the licence key from your purchase receipt.'
-  if (/\s/.test(key)) return 'A licence key does not contain spaces.'
+  if (WHITESPACE_CHAR_RE.test(key)) return 'A licence key does not contain spaces.'
   if (!key.startsWith(LICENSE_KEY_PREFIX) || key.length === LICENSE_KEY_PREFIX.length) {
     return `A ${CLI_NAME} licence key starts with ${LICENSE_KEY_PREFIX}. Copy it from your purchase receipt or the customer portal.`
   }

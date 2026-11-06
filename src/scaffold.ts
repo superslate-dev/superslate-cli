@@ -68,11 +68,14 @@ import {
   rewriteBrandContent,
   rewriteRootPackageName,
   rewriteScopeContent,
+  rewriteSiteWorkerName,
   rewriteWorkerName,
   wrapBrandedJsxText,
   wrapLongNamedImports,
   type RewriteReport,
 } from './core.js'
+
+const SHA256_CHECKSUM_LINE_RE = /^([a-f0-9]{64})\s+\*?([^\s]+)$/i
 
 const execFileAsync = promisify(execFile)
 
@@ -194,7 +197,7 @@ export function verifyReleaseMetadata(
   digest: string,
   templateRef: string,
 ): void {
-  const checksumMatch = checksum.trim().match(/^([a-f0-9]{64})\s+\*?([^\s]+)$/i)
+  const checksumMatch = checksum.trim().match(SHA256_CHECKSUM_LINE_RE)
   if (!checksumMatch || checksumMatch[2] !== artifactName) {
     throw new Error(`${CLI_NAME} release checksum metadata is malformed.`)
   }
@@ -498,6 +501,12 @@ async function applyStartIdentity(target: string, appName: string): Promise<void
   )
 }
 
+async function renameSiteWorker(target: string, appName: string): Promise<void> {
+  await rewriteIfPresent(join(target, 'apps/site/wrangler.jsonc'), content =>
+    rewriteSiteWorkerName(content, appName),
+  )
+}
+
 async function renameFrontendWorker(target: string, appName: string): Promise<void> {
   const workerPath = join(target, 'apps/web/wrangler.toml')
   if (!(await stat(workerPath).catch(() => undefined))) return
@@ -672,6 +681,7 @@ export async function scaffold(options: ScaffoldOptions): Promise<ScaffoldReport
       rewriteRootPackageName(content, options.appName),
     )
     await renameFrontendWorker(target, options.appName)
+    await renameSiteWorker(target, options.appName)
     const scope = await applyScopeRewrite(target, options.scope)
     if (selection.web) {
       await neutralizeAgentInstructions(target)

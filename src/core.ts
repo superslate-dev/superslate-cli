@@ -15,6 +15,45 @@ import {
   SOURCE_BRAND_NAME,
 } from './constants.js'
 
+const KEBAB_CASE_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const WHITESPACE_CHAR_RE = /\s/
+const NPM_SCOPE_RE = /^@[a-z0-9][a-z0-9._-]*$/
+const NEWLINE_CHAR_RE = /\r|\n/
+const BRAND_NAME_RE = /^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]*[\p{L}\p{N}])?$/u
+const REGEX_SPECIAL_CHARS_RE = /[.*+?^${}()|[\]\\]/g
+const NON_ALPHANUMERIC_CHAR_RE = /[^a-z0-9]/g
+const LEADING_DIGIT_RE = /^[0-9]/
+const HTTP_PROTOCOL_RE = /^https?:\/\//
+const APP_DOMAIN_RE =
+  /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/
+const BUNDLE_IDENTIFIER_RE = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){2,}$/
+const MOBILE_APP_SCHEME_LINE_RE = /^MOBILE_APP_SCHEME=.*$/m
+const MOBILE_DOCS_SOURCE_LINE_RE = /^\s*'mobile\.md',\n/m
+const MOBILE_EDITION_SECTION_RE = /^## Mobile edition\n[\s\S]*?(?=^## |(?![\s\S]))/m
+const MOBILE_TABLE_ROW_RE = /^\| `apps\/mobile` .*\n/gm
+const MOBILE_PARAGRAPH_RE = /^`apps\/mobile`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm
+const MOBILE_DOCS_LINK_RE = /\[([^\]]+)\]\(\.\/mobile\.md(?:#[^)]*)?\)/g
+const NAMED_IMPORT_LINE_RE = /^(\s*)(import(?:\s+type)?\s+)\{([^}]+)\}(\s+from\s+.+)$/
+const WHITESPACE_RE = /\s+/
+const INTERNAL_AGENT_REFERENCE_RE = /internal\/|landing\/|seller-surface|studio-owned/i
+const INTERNAL_CLAUDE_REFERENCE_RE = /internal\/|landing\/|studio-owned/i
+const BETTER_AUTH_SECRET_LINE_RE = /^BETTER_AUTH_SECRET=.*$/m
+const HEX_64_RE = /^[a-f0-9]{64}$/
+const DATABASE_URL_LINE_RE = /^DATABASE_URL=.*$/m
+const GHA_CREDS_FILE_RE = /^gha-creds-.*\.json$/
+
+const ESCAPED_SOURCE_BRAND = SOURCE_BRAND_NAME.replace(REGEX_SPECIAL_CHARS_RE, '\\$&')
+const SOURCE_BRAND_RE = new RegExp(`\\b${ESCAPED_SOURCE_BRAND}\\b`, 'gi')
+const ESCAPED_CLI_NAME = CLI_NAME.replace(REGEX_SPECIAL_CHARS_RE, '\\$&')
+const SOURCE_DELIVERY_GUIDANCE_RE = new RegExp(
+  `pnpm dlx ${ESCAPED_CLI_NAME}|bunx ${ESCAPED_CLI_NAME}|${ESCAPED_CLI_NAME} repository`,
+  'i',
+)
+const VENDOR_BOOTSTRAPPER_GUIDANCE_RE = new RegExp(
+  `${ESCAPED_CLI_NAME}@\\d|public \`${ESCAPED_CLI_NAME}\` npm package`,
+  'i',
+)
+
 export interface BrandManifestEntry {
   path: string
   occurrences: number
@@ -26,6 +65,7 @@ export const BRAND_MANIFEST: readonly BrandManifestEntry[] = [
   {path: 'apps/web/public/favicon/site.webmanifest', occurrences: 2},
   {path: 'apps/web/public/offline.html', occurrences: 6},
   {path: 'apps/docs/lib/shared.ts', occurrences: 1},
+  {path: 'apps/site/src/site.ts', occurrences: 1},
   {path: 'apps/docs/README.md', occurrences: 1},
   {path: 'README.md', occurrences: 1},
   {path: 'docs/meta.json', occurrences: 1},
@@ -94,7 +134,7 @@ export interface RewriteReport {
 
 export function validateAppName(value: string): string | undefined {
   if (!value) return 'App name is required.'
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) {
+  if (!KEBAB_CASE_RE.test(value)) {
     return 'App name must be kebab-case (lowercase letters, numbers, and single hyphens).'
   }
   return undefined
@@ -102,10 +142,10 @@ export function validateAppName(value: string): string | undefined {
 
 export function normalizeScope(value: string): string {
   const scope = value.startsWith('@') ? value : `@${value}`
-  if (/\s/.test(scope)) {
+  if (WHITESPACE_CHAR_RE.test(scope)) {
     throw new Error('Use hyphens instead of spaces, for example test-package.')
   }
-  if (!/^@[a-z0-9][a-z0-9._-]*$/.test(scope)) {
+  if (!NPM_SCOPE_RE.test(scope)) {
     throw new Error(
       'Use lowercase letters and numbers, with optional periods, underscores, or hyphens.',
     )
@@ -115,10 +155,10 @@ export function normalizeScope(value: string): string {
 
 export function validateBrandName(value: string): string | undefined {
   if (!value.trim()) return 'Brand name cannot be empty.'
-  if (/\r|\n/.test(value)) return 'Brand name must fit on one line.'
+  if (NEWLINE_CHAR_RE.test(value)) return 'Brand name must fit on one line.'
   if (value !== value.trim()) return 'Brand name cannot start or end with whitespace.'
   if (value.length > 48) return 'Brand name must be 48 characters or less.'
-  if (!/^[\p{L}\p{N}](?:[\p{L}\p{N} ._-]*[\p{L}\p{N}])?$/u.test(value)) {
+  if (!BRAND_NAME_RE.test(value)) {
     return 'Brand name may contain letters, numbers, spaces, periods, underscores, and hyphens.'
   }
   return undefined
@@ -145,12 +185,10 @@ export function rewriteScopeContent(
 export function rewriteBrandContent(content: string, brandName: string): RewriteResult {
   const error = validateBrandName(brandName)
   if (error) throw new Error(error)
-  const escapedSourceBrand = SOURCE_BRAND_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const sourceBrandPattern = new RegExp(`\\b${escapedSourceBrand}\\b`, 'gi')
-  const matches = content.match(sourceBrandPattern)
+  const matches = content.match(SOURCE_BRAND_RE)
   if (brandName === SOURCE_BRAND_NAME || !matches) return {content, replacements: 0}
   return {
-    content: content.replace(sourceBrandPattern, () => brandName),
+    content: content.replace(SOURCE_BRAND_RE, () => brandName),
     replacements: matches.length,
   }
 }
@@ -168,19 +206,15 @@ export function mobileSchemeFor(appName: string): string {
 }
 
 export function androidPackageSegment(appName: string): string {
-  const segment = appName.replace(/[^a-z0-9]/g, '')
-  return /^[0-9]/.test(segment) || !segment ? `app${segment}` : segment
+  const segment = appName.replace(NON_ALPHANUMERIC_CHAR_RE, '')
+  return LEADING_DIGIT_RE.test(segment) || !segment ? `app${segment}` : segment
 }
 
 export function validateAppDomain(value: string): string | undefined {
   if (!value.trim()) return 'Application domain cannot be empty.'
-  if (/^https?:\/\//.test(value)) return 'Use a bare host such as app.example.com, not a URL.'
+  if (HTTP_PROTOCOL_RE.test(value)) return 'Use a bare host such as app.example.com, not a URL.'
   if (value.includes('/')) return 'Use a bare host such as app.example.com, with no path.'
-  if (
-    !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(
-      value,
-    )
-  ) {
+  if (!APP_DOMAIN_RE.test(value)) {
     return 'Use a lowercase hostname with at least two labels, for example app.example.com.'
   }
   return undefined
@@ -188,7 +222,7 @@ export function validateAppDomain(value: string): string | undefined {
 
 export function validateBundleIdentifier(value: string): string | undefined {
   if (!value.trim()) return 'Bundle identifier cannot be empty.'
-  if (!/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*){2,}$/.test(value)) {
+  if (!BUNDLE_IDENTIFIER_RE.test(value)) {
     return 'Use at least three lowercase reverse-DNS segments, for example com.example.app.'
   }
   return undefined
@@ -285,11 +319,11 @@ export function rewriteMobileAppConfig(content: string, identity: MobileIdentity
 }
 
 export function rewriteMobileAppScheme(content: string, scheme: string): RewriteResult {
-  if (!/^MOBILE_APP_SCHEME=.*$/m.test(content)) {
+  if (!MOBILE_APP_SCHEME_LINE_RE.test(content)) {
     throw new Error('Server .env.example must contain a MOBILE_APP_SCHEME entry.')
   }
   return {
-    content: content.replace(/^MOBILE_APP_SCHEME=.*$/m, `MOBILE_APP_SCHEME=${scheme}`),
+    content: content.replace(MOBILE_APP_SCHEME_LINE_RE, `MOBILE_APP_SCHEME=${scheme}`),
     replacements: 1,
   }
 }
@@ -360,15 +394,15 @@ export function stripMobileDocsPage(content: string): string {
 }
 
 export function stripMobileDocsSource(content: string): string {
-  return content.replace(/^\s*'mobile\.md',\n/m, '')
+  return content.replace(MOBILE_DOCS_SOURCE_LINE_RE, '')
 }
 
 export function stripMobileDocsReferences(content: string): string {
   return content
-    .replace(/^## Mobile edition\n[\s\S]*?(?=^## |(?![\s\S]))/m, '')
-    .replace(/^\| `apps\/mobile` .*\n/gm, '')
-    .replace(/^`apps\/mobile`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm, '')
-    .replace(/\[([^\]]+)\]\(\.\/mobile\.md(?:#[^)]*)?\)/g, '$1')
+    .replace(MOBILE_EDITION_SECTION_RE, '')
+    .replace(MOBILE_TABLE_ROW_RE, '')
+    .replace(MOBILE_PARAGRAPH_RE, '')
+    .replace(MOBILE_DOCS_LINK_RE, '$1')
 }
 
 export function formatRewrittenPackageJson(content: string): string {
@@ -394,7 +428,7 @@ export function wrapLongNamedImports(content: string, width = 100): string {
     .split('\n')
     .map(line => {
       if (line.length <= width) return line
-      const match = line.match(/^(\s*)(import(?:\s+type)?\s+)\{([^}]+)\}(\s+from\s+.+)$/)
+      const match = line.match(NAMED_IMPORT_LINE_RE)
       if (!match) return line
       const [, indentation = '', prefix = '', names = '', suffix = ''] = match
       const members = names.split(',').map(name => name.trim())
@@ -444,7 +478,7 @@ export function wrapBrandedJsxText(content: string, brandName: string, width = 1
     }
 
     let current = indentation
-    for (const word of joined.split(/\s+/)) {
+    for (const word of joined.split(WHITESPACE_RE)) {
       const candidate = current === indentation ? `${indentation}${word}` : `${current} ${word}`
       if (candidate.length > width && current !== indentation) {
         output.push(current)
@@ -479,6 +513,17 @@ export function rewriteWorkerName(content: string, appName: string): RewriteResu
   return {content: content.replace(WORKER_NAME_DECLARATION, replacement), replacements: 1}
 }
 
+const JSONC_WORKER_NAME_FIELD = /("name":\s*")[^"]*(")/
+
+export function rewriteSiteWorkerName(content: string, appName: string): string {
+  const error = validateAppName(appName)
+  if (error) throw new Error(error)
+  if (!JSONC_WORKER_NAME_FIELD.test(content)) {
+    throw new Error('The site Worker configuration is missing a name field.')
+  }
+  return content.replace(JSONC_WORKER_NAME_FIELD, `$1${appName}-site$2`)
+}
+
 function replaceMarkdownSection(content: string, heading: string, replacement: string): string {
   const marker = `## ${heading}\n`
   const start = content.indexOf(marker)
@@ -500,7 +545,7 @@ function removeParagraphContaining(content: string, fragment: string): string {
 export function rewriteBuyerAgentInstructions(content: string): string {
   if (
     content.includes('Audit and remediate the complete buyer-owned SaaS application') &&
-    !/internal\/|landing\/|seller-surface|studio-owned/i.test(content)
+    !INTERNAL_AGENT_REFERENCE_RE.test(content)
   ) {
     return content
   }
@@ -530,7 +575,7 @@ into this repository.
     .join('\n')
     .replace('real env files, `internal/`, or\n  `bun.lock`', 'real env files, or `bun.lock`')
 
-  if (/internal\/|landing\/|seller-surface|studio-owned/i.test(rewritten)) {
+  if (INTERNAL_AGENT_REFERENCE_RE.test(rewritten)) {
     throw new Error('Buyer agent instructions still contain seller-only guidance.')
   }
   return rewritten
@@ -635,10 +680,10 @@ export function stripSellerOnlyRootScripts(content: string): string {
 }
 
 export function rewriteBuyerClaudeInstructions(content: string): string {
-  if (!/internal\/|landing\/|studio-owned/i.test(content)) return content
+  if (!INTERNAL_CLAUDE_REFERENCE_RE.test(content)) return content
 
   const rewritten = removeParagraphContaining(content, '`internal/landing/AGENTS.md`')
-  if (/internal\/|landing\/|studio-owned/i.test(rewritten)) {
+  if (INTERNAL_CLAUDE_REFERENCE_RE.test(rewritten)) {
     throw new Error('Buyer Claude instructions still contain seller-only guidance.')
   }
   return rewritten
@@ -647,13 +692,7 @@ export function rewriteBuyerClaudeInstructions(content: string): string {
 export function rewriteBuyerSetupInstructions(content: string): string {
   if (!content.includes('## Create a product repository')) return content
   const rewritten = replaceMarkdownSection(content, 'Create a product repository', '')
-  const escapedCliName = CLI_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  if (
-    new RegExp(
-      `pnpm dlx ${escapedCliName}|bunx ${escapedCliName}|${escapedCliName} repository`,
-      'i',
-    ).test(rewritten)
-  ) {
+  if (SOURCE_DELIVERY_GUIDANCE_RE.test(rewritten)) {
     throw new Error('Buyer setup instructions still contain source-delivery guidance.')
   }
   return rewritten
@@ -662,12 +701,7 @@ export function rewriteBuyerSetupInstructions(content: string): string {
 export function rewriteBuyerReleaseInstructions(content: string): string {
   if (!content.includes('## npm bootstrapper')) return content
   const rewritten = replaceMarkdownSection(content, 'npm bootstrapper', '')
-  const escapedCliName = CLI_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  if (
-    new RegExp(`${escapedCliName}@\\d|public \`${escapedCliName}\` npm package`, 'i').test(
-      rewritten,
-    )
-  ) {
+  if (VENDOR_BOOTSTRAPPER_GUIDANCE_RE.test(rewritten)) {
     throw new Error('Buyer release instructions still contain vendor bootstrapper guidance.')
   }
   return rewritten
@@ -677,10 +711,10 @@ export function generateStartDevVars(
   example: string,
   secret = randomBytes(32).toString('base64'),
 ): string {
-  if (!/^BETTER_AUTH_SECRET=.*$/m.test(example)) {
+  if (!BETTER_AUTH_SECRET_LINE_RE.test(example)) {
     throw new Error('apps/start/.dev.vars.example must contain a BETTER_AUTH_SECRET entry.')
   }
-  return example.replace(/^BETTER_AUTH_SECRET=.*$/m, `BETTER_AUTH_SECRET=${secret}`)
+  return example.replace(BETTER_AUTH_SECRET_LINE_RE, `BETTER_AUTH_SECRET=${secret}`)
 }
 
 export function generateServerEnv(
@@ -688,10 +722,10 @@ export function generateServerEnv(
   secret = randomBytes(32).toString('hex'),
   databasePort = 5432,
 ): string {
-  if (!/^[a-f0-9]{64}$/.test(secret)) {
+  if (!HEX_64_RE.test(secret)) {
     throw new Error('Better Auth secret must be 32 bytes encoded as hex.')
   }
-  if (!/^DATABASE_URL=.*$/m.test(example) || !/^BETTER_AUTH_SECRET=.*$/m.test(example)) {
+  if (!DATABASE_URL_LINE_RE.test(example) || !BETTER_AUTH_SECRET_LINE_RE.test(example)) {
     throw new Error('Server .env.example must contain DATABASE_URL and BETTER_AUTH_SECRET entries.')
   }
   if (!Number.isInteger(databasePort) || databasePort < 1 || databasePort > 65_535) {
@@ -699,8 +733,8 @@ export function generateServerEnv(
   }
   const databaseUrl = `postgresql://app:app@localhost:${databasePort}/app?sslmode=disable`
   return example
-    .replace(/^DATABASE_URL=.*$/m, `DATABASE_URL=${databaseUrl}`)
-    .replace(/^BETTER_AUTH_SECRET=.*$/m, `BETTER_AUTH_SECRET=${secret}`)
+    .replace(DATABASE_URL_LINE_RE, `DATABASE_URL=${databaseUrl}`)
+    .replace(BETTER_AUTH_SECRET_LINE_RE, `BETTER_AUTH_SECRET=${secret}`)
 }
 
 const SCOPE_EXTENSIONS = new Set(['.json', '.jsonc', '.md', '.ts', '.tsx', '.yaml', '.yml'])
@@ -732,13 +766,13 @@ export function isTemplatePathExcluded(relativePath: string): boolean {
     const mobileEntry = parts[2] ?? ''
     if (['.expo', 'android', 'ios', 'credentials', 'dist-verify'].includes(mobileEntry)) return true
   }
-  if (parts.includes('.wrangler')) return true
+  if (parts.includes('.wrangler') || parts.includes('.astro')) return true
   if (parts.includes('dist') || parts.includes('out')) return true
   if (parts.includes('.next') || parts.includes('.source') || parts.includes('.turbo')) return true
   if (normalized === 'bun.lock') return true
   if (normalized === '.vercelignore') return true
   if (basename.endsWith('.tfvars') || basename === 'backend.hcl') return true
-  if (basename.includes('.tfstate') || /^gha-creds-.*\.json$/.test(basename)) return true
+  if (basename.includes('.tfstate') || GHA_CREDS_FILE_RE.test(basename)) return true
   if (normalized === 'PLAN.md' || normalized === 'comments.md') return true
   if (normalized === 'packages/create-app/src/cli-brand-contract.test.ts') return true
   if (normalized === 'packages/create-app/src/commercial-contract.test.ts') return true
