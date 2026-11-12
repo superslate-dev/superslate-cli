@@ -4,6 +4,7 @@ import {resolve} from 'node:path'
 
 import {
   applyDeploymentSelection,
+  cloudLabels,
   parseDeploymentCloud,
   parseFrontendTarget,
   parseStorageProvider,
@@ -64,12 +65,14 @@ export async function runDeploymentConfigure(
     const selection = await collectDeploymentSelection(parsed, parsed.yes)
     const removed = await applyDeploymentSelection(root, rootPackage.name, selection)
     prompts.log.success(
-      `${selection.cloud.toUpperCase()} + ${selection.storageProvider} + ${selection.frontendTarget} is locked for ${selection.environment}.`,
+      `${cloudLabels[selection.cloud]} + ${selection.storageProvider} + ${selection.frontendTarget} is locked for ${selection.environment}.`,
     )
     prompts.log.info(`${removed.length} unused deployment paths removed.`)
     prompts.log.step('Next')
     prompts.log.message(
-      `Review deployment/config.json\nConfigure the protected GitHub environment\nDispatch .github/workflows/deploy-cloud.yml`,
+      selection.cloud === 'railway'
+        ? 'Review deployment/config.json\nFollow deployment/README.md for the Railway services and Cloudflare frontend'
+        : 'Review deployment/config.json\nConfigure the protected GitHub environment\nDispatch .github/workflows/deploy-cloud.yml',
     )
     prompts.outro('Deployment configuration is ready to commit.')
   } catch (error) {

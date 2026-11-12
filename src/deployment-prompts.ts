@@ -1,8 +1,11 @@
 import * as prompts from '@clack/prompts'
 
 import {
+  cloudLabels,
   defaultRegions,
   defaultStorageProviders,
+  frontendTargetsByCloud,
+  isOpenTofuCloud,
   parseDeploymentCloud,
   parseFrontendTarget,
   parseStorageProvider,
@@ -21,7 +24,7 @@ export interface DeploymentPromptDefaults {
   storageProvider?: StorageProvider
   frontendTarget?: FrontendTarget
   environment?: string
-  region?: string
+  region?: string | null
   apiDomain?: string
   frontendDomain?: string
   haEnabled?: boolean
@@ -47,12 +50,15 @@ export async function collectDeploymentSelection(
         'Non-interactive deployment setup requires --cloud, --api-domain, and --frontend-domain.',
       )
     }
+    const cloud = defaults.cloud
     return {
-      cloud: defaults.cloud,
-      storageProvider: defaults.storageProvider ?? defaultStorageProviders[defaults.cloud],
-      frontendTarget: defaults.frontendTarget ?? 'native',
+      cloud,
+      storageProvider: defaults.storageProvider ?? defaultStorageProviders[cloud],
+      frontendTarget: defaults.frontendTarget ?? frontendTargetsByCloud[cloud][0] ?? 'cloudflare',
       environment: defaults.environment ?? 'production',
-      region: defaults.region ?? defaultRegions[defaults.cloud],
+      region: isOpenTofuCloud(cloud)
+        ? (defaults.region ?? defaultRegions[cloud])
+        : (defaults.region ?? null),
       apiDomain: defaults.apiDomain,
       frontendDomain: defaults.frontendDomain,
       haEnabled: defaults.haEnabled ?? false,
@@ -64,33 +70,32 @@ export async function collectDeploymentSelection(
     parseDeploymentCloud(
       await unwrap(
         await prompts.select({
-          message: 'Backend cloud',
+          message: 'Backend host',
           options: [
-            {value: 'aws', label: 'AWS', hint: 'ECS Fargate + RDS PostgreSQL'},
-            {value: 'gcp', label: 'Google Cloud', hint: 'Cloud Run + Cloud SQL'},
-            {value: 'azure', label: 'Azure', hint: 'Container Apps + Flexible Server'},
+            {value: 'aws', label: 'AWS', hint: 'ECS Fargate + RDS PostgreSQL, OpenTofu'},
+            {value: 'gcp', label: 'Google Cloud', hint: 'Cloud Run + Cloud SQL, OpenTofu'},
+            {value: 'railway', label: 'Railway', hint: 'Managed container + PostgreSQL'},
           ],
         }),
       ),
     )
+  const frontendOptions = frontendTargetsByCloud[cloud]
   const frontendTarget =
     defaults.frontendTarget ??
-    parseFrontendTarget(
-      await unwrap(
-        await prompts.select({
-          message: 'Frontend host',
-          options: [
-            {value: 'native', label: 'Cloud native', hint: 'Managed with the backend'},
-            {value: 'vercel', label: 'Vercel SPA', hint: 'Static frontend only'},
-            {
-              value: 'cloudflare',
-              label: 'Cloudflare static assets',
-              hint: 'No API Worker',
-            },
-          ],
-        }),
-      ),
-    )
+    (frontendOptions.length === 1
+      ? (frontendOptions[0] ?? 'cloudflare')
+      : parseFrontendTarget(
+          await unwrap(
+            await prompts.select({
+              message: 'Frontend host',
+              options: frontendOptions.map(target =>
+                target === 'native'
+                  ? {value: target, label: 'Cloud native', hint: 'Managed with the backend'}
+                  : {value: target, label: 'Cloudflare static assets', hint: 'No API Worker'},
+              ),
+            }),
+          ),
+        ))
   const storageProvider =
     defaults.storageProvider ??
     (storageProvidersByCloud[cloud].length === 1
@@ -122,16 +127,17 @@ export async function collectDeploymentSelection(
         validate: value => validateDeploymentEnvironment(value || 'production'),
       }),
     ))
-  const region =
-    defaults.region ??
-    (await unwrap(
-      await prompts.text({
-        message: `${cloud.toUpperCase()} region`,
-        placeholder: defaultRegions[cloud],
-        defaultValue: defaultRegions[cloud],
-        validate: value => validateRegion(value || defaultRegions[cloud]),
-      }),
-    ))
+  const region = !isOpenTofuCloud(cloud)
+    ? (defaults.region ?? null)
+    : (defaults.region ??
+      (await unwrap(
+        await prompts.text({
+          message: `${cloudLabels[cloud]} region`,
+          placeholder: defaultRegions[cloud],
+          defaultValue: defaultRegions[cloud],
+          validate: value => validateRegion(value || defaultRegions[cloud]),
+        }),
+      )))
   const apiDomain =
     defaults.apiDomain ??
     (await unwrap(
@@ -150,14 +156,15 @@ export async function collectDeploymentSelection(
         validate: value => validateDomain(value ?? ''),
       }),
     ))
-  const haEnabled =
-    defaults.haEnabled ??
-    (await unwrap(
-      await prompts.confirm({
-        message: 'Enable the higher-availability profile?',
-        initialValue: false,
-      }),
-    ))
+  const haEnabled = !isOpenTofuCloud(cloud)
+    ? (defaults.haEnabled ?? false)
+    : (defaults.haEnabled ??
+      (await unwrap(
+        await prompts.confirm({
+          message: 'Enable the higher-availability profile?',
+          initialValue: false,
+        }),
+      )))
 
   return {
     cloud,

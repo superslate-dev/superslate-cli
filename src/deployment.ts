@@ -6,11 +6,13 @@ const REGION_RE = /^[a-z0-9][a-z0-9-]{1,31}$/
 const DOMAIN_RE =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 
-export const deploymentClouds = ['aws', 'gcp', 'azure'] as const
-export const frontendTargets = ['native', 'vercel', 'cloudflare'] as const
+export const deploymentClouds = ['aws', 'gcp', 'railway'] as const
+const openTofuClouds = ['aws', 'gcp'] as const
+export const frontendTargets = ['native', 'cloudflare'] as const
 export const storageProviders = ['r2', 's3', 'gcs'] as const
 
 export type DeploymentCloud = (typeof deploymentClouds)[number]
+type OpenTofuCloud = (typeof openTofuClouds)[number]
 export type FrontendTarget = (typeof frontendTargets)[number]
 export type StorageProvider = (typeof storageProviders)[number]
 
@@ -19,7 +21,7 @@ export interface DeploymentSelection {
   storageProvider: StorageProvider
   frontendTarget: FrontendTarget
   environment: string
-  region: string
+  region: string | null
   apiDomain: string
   frontendDomain: string
   haEnabled: boolean
@@ -31,7 +33,7 @@ export interface DeploymentConfig {
   storage_provider: StorageProvider
   project_name: string
   environment: string
-  region: string
+  region: string | null
   frontend_target: FrontendTarget
   external_frontend_origin: string | null
   api_domain: string
@@ -39,22 +41,37 @@ export interface DeploymentConfig {
   ha_enabled: boolean
 }
 
-export const defaultRegions: Record<DeploymentCloud, string> = {
+export const defaultRegions: Record<OpenTofuCloud, string> = {
   aws: 'us-east-1',
   gcp: 'us-central1',
-  azure: 'eastus2',
 }
 
 export const defaultStorageProviders: Record<DeploymentCloud, StorageProvider> = {
   aws: 's3',
   gcp: 'gcs',
-  azure: 'r2',
+  railway: 'r2',
 }
 
 export const storageProvidersByCloud: Record<DeploymentCloud, StorageProvider[]> = {
   aws: ['s3', 'r2'],
   gcp: ['gcs', 'r2'],
-  azure: ['r2'],
+  railway: ['r2'],
+}
+
+export const frontendTargetsByCloud: Record<DeploymentCloud, FrontendTarget[]> = {
+  aws: ['native', 'cloudflare'],
+  gcp: ['native', 'cloudflare'],
+  railway: ['cloudflare'],
+}
+
+export const cloudLabels: Record<DeploymentCloud, string> = {
+  aws: 'AWS',
+  gcp: 'GCP',
+  railway: 'Railway',
+}
+
+export function isOpenTofuCloud(cloud: DeploymentCloud): cloud is OpenTofuCloud {
+  return openTofuClouds.some(candidate => candidate === cloud)
 }
 
 function isDeploymentCloud(value: string): value is DeploymentCloud {
@@ -70,13 +87,13 @@ function isStorageProvider(value: string): value is StorageProvider {
 }
 
 export function parseDeploymentCloud(value: string): DeploymentCloud {
-  if (!isDeploymentCloud(value)) throw new Error('Cloud must be aws, gcp, or azure.')
+  if (!isDeploymentCloud(value)) throw new Error('Cloud must be aws, gcp, or railway.')
   return value
 }
 
 export function parseFrontendTarget(value: string): FrontendTarget {
   if (!isFrontendTarget(value)) {
-    throw new Error('Frontend target must be native, vercel, or cloudflare.')
+    throw new Error('Frontend target must be native or cloudflare.')
   }
   return value
 }
@@ -113,10 +130,24 @@ export function validateDeploymentSelection(selection: DeploymentSelection): voi
       `${selection.storageProvider} storage is not supported for ${selection.cloud} deployments.`,
     )
   }
+  if (!frontendTargetsByCloud[selection.cloud].includes(selection.frontendTarget)) {
+    throw new Error(
+      `The ${selection.frontendTarget} frontend is not supported for ${selection.cloud} deployments.`,
+    )
+  }
+  if (isOpenTofuCloud(selection.cloud)) {
+    const regionError = validateRegion(selection.region ?? '')
+    if (regionError) throw new Error(regionError)
+  } else {
+    if (selection.region !== null) {
+      throw new Error('Railway selects its region per service; omit the region.')
+    }
+    if (selection.haEnabled) {
+      throw new Error('The higher-availability profile applies to AWS and GCP only.')
+    }
+  }
   const environmentError = validateDeploymentEnvironment(selection.environment)
   if (environmentError) throw new Error(environmentError)
-  const regionError = validateRegion(selection.region)
-  if (regionError) throw new Error(regionError)
   const apiError = validateDomain(selection.apiDomain)
   if (apiError) throw new Error(`API domain: ${apiError}`)
   const frontendError = validateDomain(selection.frontendDomain)
@@ -152,19 +183,88 @@ export function createDeploymentConfig(
   }
 }
 
-function deploymentReadme(config: DeploymentConfig): string {
+function lockSummary(config: DeploymentConfig): string {
+  return `The deployment target is locked:
+
+- backend: **${cloudLabels[config.cloud]}**;
+- storage: **${config.storage_provider}**;
+- frontend: **${config.frontend_target}**;
+- environment: **${config.environment}**.`
+}
+
+function railwayReadme(config: DeploymentConfig): string {
+  return `# Deployment setup
+
+${lockSummary(config)}
+
+The production hosts are:
+
+- API: \`${config.api_domain}\`;
+- frontend: \`${config.frontend_domain}\`.
+
+## Railway API and PostgreSQL
+
+1. Create a Railway project with a PostgreSQL service and an API service connected to this
+   repository. Build from the repository root, because the image copies the whole workspace.
+2. Set the API service's config-as-code path to \`apps/server/railway.toml\`. It builds
+   \`apps/server/Dockerfile\`, runs \`./server migrate\` before each deploy, starts \`./server serve\`,
+   and admits traffic only after \`/ready\` succeeds.
+3. Set these API service variables in the \`${config.environment}\` Railway environment:
+
+   \`\`\`text
+   DATABASE_URL=\${{Postgres.DATABASE_URL}}
+   ENVIRONMENT=production
+   TRUSTED_PROXY_PROFILE=railway
+   DEPLOYMENT_CLOUD=railway
+   FRONTEND_URL=https://${config.frontend_domain}
+   SERVER_URL=https://${config.api_domain}
+   \`\`\`
+
+   Add \`BETTER_AUTH_SECRET\`, \`RESEND_API_KEY\`, \`EMAIL_FROM\`, \`APP_DB_POOL_MAX\`, and
+   \`AUTH_DB_POOL_MAX\`, then the Cloudflare R2 storage variables and every enabled billing,
+   monitoring, and OAuth value. Railway injects \`PORT\`; leave it unset.
+
+4. Add the API host as the service's custom domain and publish the DNS records Railway reports. A
+   Cloudflare-managed zone keeps them \`DNS only\`.
+
+## Cloudflare frontend
+
+1. Create a Cloudflare Workers project rooted at \`apps/web\`. It uses \`apps/web/wrangler.toml\`, which
+   serves \`dist\` as static assets with single-page-application fallback.
+2. Build with \`pnpm run build:prod\` and these variables:
+
+   \`\`\`text
+   VITE_APP_ENV=production
+   VITE_API_URL=https://${config.api_domain}
+   \`\`\`
+
+   Add \`VITE_TERMS_URL\` and \`VITE_PRIVACY_URL\`, plus \`VITE_MARKETING_URL\` when the product has a
+   public marketing site.
+
+3. Attach the frontend host as the Worker's custom domain.
+
+## Verify
+
+\`\`\`sh
+API_ORIGIN=https://${config.api_domain} \\
+WEB_ORIGIN=https://${config.frontend_domain} \\
+bash scripts/verify-public-deployment.sh
+\`\`\`
+
+The provider lock is deliberate. Restore the deployment directories from a fresh licensed release
+before changing providers.
+`
+}
+
+function openTofuReadme(config: DeploymentConfig): string {
   const identity =
     config.cloud === 'aws'
       ? '`AWS_ROLE_ARN` secret'
-      : config.cloud === 'gcp'
-        ? '`GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT` secrets'
-        : '`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and `AZURE_SUBSCRIPTION_ID` secrets'
+      : '`GCP_WORKLOAD_IDENTITY_PROVIDER` and `GCP_SERVICE_ACCOUNT` secrets'
   const providerInputs =
     config.cloud === 'aws'
       ? 'Route 53 zone or certificate identifiers and runtime Secrets Manager ARNs'
-      : config.cloud === 'gcp'
-        ? 'GCP project, Cloud DNS zone, and runtime Secret Manager names'
-        : 'Azure DNS zone ID and runtime Key Vault secret identifiers'
+      : 'GCP project, Cloud DNS zone, and runtime Secret Manager names'
   const storageSetup =
     config.storage_provider === 'r2'
       ? 'Create private staging and public Cloudflare R2 buckets, then store the required storage\n   variables in the runtime secret container.'
@@ -172,12 +272,7 @@ function deploymentReadme(config: DeploymentConfig): string {
 
   return `# Deployment setup
 
-The deployment target is locked:
-
-- backend: **${config.cloud.toUpperCase()}**;
-- storage: **${config.storage_provider}**;
-- frontend: **${config.frontend_target}**;
-- environment: **${config.environment}**.
+${lockSummary(config)}
 
 ## Protected GitHub environment
 
@@ -187,8 +282,8 @@ Create a GitHub environment named \`${config.environment}\` and configure:
 - a \`BACKEND_HCL\` secret containing the selected remote-state backend configuration;
 - a \`TFVARS_JSON\` secret containing only:
   - ${providerInputs};
-- \`VITE_TERMS_URL\` and \`VITE_PRIVACY_URL\`, plus \`VITE_MARKETING_URL\` when the product has a
-  public marketing site.
+- \`VITE_TERMS_URL\` and \`VITE_PRIVACY_URL\`, plus \`VITE_MARKETING_URL\` when the product has a public
+  marketing site.
 
 ## Cloud preparation
 
@@ -209,14 +304,53 @@ The workflow creates the registry first, pushes an immutable image, provisions t
 traffic disabled, runs migrations, and admits traffic only after migration succeeds.
 
 The provider lock is deliberate. Restore the deployment directories from a fresh licensed release
-before changing cloud providers.
+before changing providers.
 `
+}
+
+function deploymentReadme(config: DeploymentConfig): string {
+  return config.cloud === 'railway' ? railwayReadme(config) : openTofuReadme(config)
+}
+
+function openTofuPaths(cloud: OpenTofuCloud): string[] {
+  return [
+    `infra/bootstrap/${cloud}`,
+    `infra/modules/${cloud}`,
+    `infra/roots/${cloud}`,
+    `scripts/deploy/release-${cloud}.sh`,
+    `scripts/deploy/frontend-${cloud}.sh`,
+  ]
+}
+
+function unusedDeploymentPaths(selection: DeploymentSelection): string[] {
+  const paths =
+    selection.cloud === 'railway'
+      ? ['infra', 'scripts/deploy', '.github/workflows/deploy-cloud.yml']
+      : [
+          ...openTofuClouds.filter(cloud => cloud !== selection.cloud).flatMap(openTofuPaths),
+          'apps/server/railway.toml',
+        ]
+  if (selection.frontendTarget === 'native') paths.push('apps/web/wrangler.toml')
+  else if (selection.cloud !== 'railway') {
+    paths.push(`scripts/deploy/frontend-${selection.cloud}.sh`)
+  }
+  return paths
 }
 
 async function removeIfPresent(target: string): Promise<boolean> {
   if (!(await stat(target).catch(() => undefined))) return false
   await rm(target, {recursive: true, force: true})
   return true
+}
+
+async function removeInfrastructureScript(repositoryRoot: string): Promise<void> {
+  const packagePath = join(repositoryRoot, 'package.json')
+  const content = await readFile(packagePath, 'utf8').catch(() => undefined)
+  if (!content) return
+  const rootPackage = JSON.parse(content) as {scripts?: Record<string, string>}
+  if (!rootPackage.scripts?.['verify:infra']) return
+  delete rootPackage.scripts['verify:infra']
+  await writeFile(packagePath, `${JSON.stringify(rootPackage, null, 2)}\n`)
 }
 
 export async function applyDeploymentSelection(
@@ -235,42 +369,10 @@ export async function applyDeploymentSelection(
   await writeFile(join(repositoryRoot, 'deployment/README.md'), deploymentReadme(config))
 
   const removed: string[] = []
-  for (const cloud of deploymentClouds) {
-    if (cloud === selection.cloud) continue
-    for (const relativePath of [
-      `infra/bootstrap/${cloud}`,
-      `infra/modules/${cloud}`,
-      `infra/roots/${cloud}`,
-      `scripts/deploy/release-${cloud}.sh`,
-      `scripts/deploy/frontend-${cloud}.sh`,
-    ]) {
-      if (await removeIfPresent(join(repositoryRoot, relativePath))) removed.push(relativePath)
-    }
+  for (const relativePath of unusedDeploymentPaths(selection)) {
+    if (await removeIfPresent(join(repositoryRoot, relativePath))) removed.push(relativePath)
   }
-
-  const adapters = [
-    {target: 'vercel', path: 'apps/web/vercel.json'},
-    {target: 'cloudflare', path: 'apps/web/wrangler.toml'},
-    {
-      target: 'azure-native',
-      path: 'apps/web/public/staticwebapp.config.json',
-    },
-  ] as const
-  const selectedAdapter =
-    selection.frontendTarget === 'native'
-      ? selection.cloud === 'azure'
-        ? 'azure-native'
-        : undefined
-      : selection.frontendTarget
-  for (const adapter of adapters) {
-    if (adapter.target === selectedAdapter) continue
-    if (await removeIfPresent(join(repositoryRoot, adapter.path))) removed.push(adapter.path)
-  }
-
-  if (selection.frontendTarget !== 'native') {
-    const nativeScript = `scripts/deploy/frontend-${selection.cloud}.sh`
-    if (await removeIfPresent(join(repositoryRoot, nativeScript))) removed.push(nativeScript)
-  }
+  if (removed.includes('infra')) await removeInfrastructureScript(repositoryRoot)
 
   return removed
 }

@@ -21,6 +21,7 @@ import {isEntrypoint, runCaptured, runInherited} from './runtime.js'
 import {collectDeploymentSelection, type DeploymentPromptDefaults} from './deployment-prompts.js'
 import {
   applyDeploymentSelection,
+  cloudLabels,
   parseDeploymentCloud,
   parseFrontendTarget,
   parseStorageProvider,
@@ -103,15 +104,15 @@ Options:
   --no-install        Skip dependency installation
   --start             Start Postgres and development servers after creation
   --no-start          Create the application without starting it
-  --cloud <provider>  Configure AWS, GCP, or Azure deployment during setup
+  --cloud <provider>  Configure AWS, GCP, or Railway deployment during setup
   --storage <provider> Select r2, s3, or gcs object storage
-  --no-deploy         Keep every cloud option for later deployment setup
-  --frontend <target> Select native, vercel, or cloudflare frontend hosting
+  --no-deploy         Keep every deployment option for later setup
+  --frontend <target> Select native or cloudflare frontend hosting (Railway: cloudflare)
   --deploy-environment <name> Deployment environment (default: production)
-  --region <name>      Cloud region
+  --region <name>      AWS or GCP region
   --api-domain <host>  Stable production API hostname
   --frontend-domain <host> Stable production frontend hostname
-  --ha / --no-ha      Enable or disable the higher-availability profile
+  --ha / --no-ha      Enable or disable the AWS or GCP higher-availability profile
   -v, --version       Print the CLI version
   -h, --help          Show this help
 
@@ -119,7 +120,8 @@ Agent tooling:
   ${agentSetupUsage(CLI_NAME)}
 
 Deployment:
-  Run pnpm deploy:configure inside a generated app to make a deferred cloud selection.`
+  Run pnpm deploy:configure inside a generated app to make a deferred deployment selection.
+  The TanStack Start edition always deploys to Cloudflare Workers and D1.`
 }
 
 function takeValue(args: string[], index: number, flag: string): string {
@@ -682,7 +684,7 @@ async function main(): Promise<void> {
     }
     if (options.deployment) {
       prompts.log.info(
-        `Deployment ${options.deployment.cloud.toUpperCase()} + ${options.deployment.storageProvider} + ${options.deployment.frontendTarget} locked. Review deployment/README.md.`,
+        `Deployment ${cloudLabels[options.deployment.cloud]} + ${options.deployment.storageProvider} + ${options.deployment.frontendTarget} locked. Review deployment/README.md.`,
       )
     } else {
       prompts.log.info('Deployment deferred. Run `pnpm deploy:configure` when you are ready.')
