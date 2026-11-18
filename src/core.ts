@@ -33,7 +33,8 @@ const MOBILE_EDITION_SECTION_RE = /^## Mobile edition\n[\s\S]*?(?=^## |(?![\s\S]
 const MOBILE_TABLE_ROW_RE = /^\| `apps\/mobile` .*\n/gm
 const MOBILE_PARAGRAPH_RE = /^`apps\/mobile`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm
 const MOBILE_DOCS_LINK_RE = /\[([^\]]+)\]\(\.\/mobile\.md(?:#[^)]*)?\)/g
-const NAMED_IMPORT_LINE_RE = /^(\s*)(import(?:\s+type)?\s+)\{([^}]+)\}(\s+from\s+.+)$/
+const NAMED_IMPORT_LINE_RE =
+  /^(\s*)(import(?:\s+type)?\s+(?:[\w$]+,\s*)?)\{([^}]+)\}(\s+from\s+.+)$/
 const WHITESPACE_RE = /\s+/
 const INTERNAL_AGENT_REFERENCE_RE = /internal\/|landing\/|seller-surface|studio-owned/i
 const INTERNAL_CLAUDE_REFERENCE_RE = /internal\/|landing\/|studio-owned/i
@@ -432,6 +433,7 @@ export function wrapLongNamedImports(content: string, width = 100): string {
       if (!match) return line
       const [, indentation = '', prefix = '', names = '', suffix = ''] = match
       const members = names.split(',').map(name => name.trim())
+      if (members.length === 1 && !prefix.includes(',')) return line
       return [
         `${indentation}${prefix}{`,
         ...members.map(name => `${indentation}  ${name},`),
@@ -737,7 +739,7 @@ export function generateServerEnv(
     .replace(BETTER_AUTH_SECRET_LINE_RE, `BETTER_AUTH_SECRET=${secret}`)
 }
 
-const SCOPE_EXTENSIONS = new Set(['.json', '.jsonc', '.md', '.ts', '.tsx', '.yaml', '.yml'])
+const SCOPE_EXTENSIONS = new Set(['.css', '.json', '.jsonc', '.md', '.ts', '.tsx', '.yaml', '.yml'])
 
 export function isScopeRewriteFile(path: string): boolean {
   return (

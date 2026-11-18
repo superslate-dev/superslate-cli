@@ -7,6 +7,7 @@ const START_TABLE_ROW_RE = /^\| `apps\/start` .*\n/gm
 const START_PARAGRAPH_RE = /^`apps\/start`[\s\S]*?(?:\n\n|\n?(?![\s\S]))/gm
 const WORKER_NAME_FIELD_RE = /("name":\s*")[^"]+(")/
 const DATABASE_NAME_FIELD_RE = /("database_name":\s*")[^"]+(")/
+const BUCKET_NAME_FIELD_RE = /("bucket_name":\s*")[^"]+(")/g
 
 export const EDITION_NAMES = ['web', 'mobile', 'start'] as const
 
@@ -28,6 +29,7 @@ export const START_ONLY_KEPT_PATHS = [
   'apps/site',
   'packages/billing',
   'packages/tsconfig',
+  'packages/ui',
   '.github/workflows/deploy-start.yml',
   '.gitattributes',
   '.gitignore',
@@ -135,6 +137,7 @@ export function rewriteStartWorkerIdentifiers(content: string, appName: string):
   return content
     .replace(WORKER_NAME_FIELD_RE, `$1${appName}$2`)
     .replace(DATABASE_NAME_FIELD_RE, `$1${appName}$2`)
+    .replace(BUCKET_NAME_FIELD_RE, `$1${appName}-files$2`)
 }
 
 export function startOnlyRootPackage(rootPackage: string, overlayPackage: string): string {
